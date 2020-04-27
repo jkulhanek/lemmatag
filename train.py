@@ -245,7 +245,7 @@ class Network:
 
             print(f'epoch: {logdict["epoch"]}, loss: {logdict["train_tagger_loss"]:.4f}, grad_norm: {logdict["train_grad_norm"]:.4f}, val_loss: {logdict["val_tagger_loss"]:.4f}, accuracy: {logdict["val_tagger_accuracy"]:.4f}')
             if not self.args.test:
-                wandb.log(logdict, step=epoch)
+                wandb.log(logdict, step=epoch + 1)
 
             # Save model every fifth epoch
             if (epoch + 1) % 5 == 0:
