@@ -107,10 +107,10 @@ def download_dataset(data_folder):
     dataset_path = os.path.join(data_folder, "ud-treebanks-v2.2.tgz")
 
     print("Downloading dataset")
-    #download_file(dataset_url, dataset_path)
+    download_file(dataset_url, dataset_path)
 
     print("Extracting dataset")
-    #extract_file(dataset_path, data_folder)
+    extract_file(dataset_path, data_folder)
 
     print("Converting to LemmaTag format")
     dataset_path = os.path.join(data_folder, 'ud-treebanks-v2.2') 
@@ -126,8 +126,8 @@ def ensure_dataset_exists(data_folder):
 
 if __name__ == "__main__":
     data_folder = os.environ['DATASETS_PATH'] if 'DATASETS_PATH' in os.environ else os.path.expanduser('~/datasets')
-    #if not ensure_dataset_exists(data_folder):
-    #    print('Dataset already exists')
-    download_dataset(data_folder)
+    if not ensure_dataset_exists(data_folder):
+        print('Dataset already exists')
+    # download_dataset(data_folder)
 
 
