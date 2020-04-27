@@ -1,17 +1,24 @@
 #!/usr/bin/env python3
 import argparse
+import os
+from download_datasets import ensure_dataset_exists
 
 if __name__ == "__main__":
     # Parse arguments
     parser = argparse.ArgumentParser()
     parser.add_argument("predictions", type=str, help="Path to predicted output.")
-    parser.add_argument("gold", type=str, help="Path to gold output (extract from .zip).")
+    parser.add_argument("dataset", type=str, choices=['dev', 'test', 'train'])
     args = parser.parse_args([] if "__file__" not in globals() else None)
+
+    data_folder = os.environ['DATASETS_PATH'] if 'DATASETS_PATH' in os.environ else os.path.expanduser('~/datasets')
+    ensure_dataset_exists(data_folder)
+    dataset_path = os.path.join(data_folder, 'ud-treebanks-v2.2/UD_Czech-PDT') 
+    gold_path = os.path.join(dataset_path, f'cs_pdt-ud-{args.dataset}.lemmatag')
 
     with open(args.predictions, "r", encoding="utf-8") as predictions_file:
         predictions = [line.rstrip("\n") for line in predictions_file]
 
-    with open(args.gold, "r", encoding="utf-8") as gold_file:
+    with open(gold_path, "r", encoding="utf-8") as gold_file:
         gold = [line.rstrip("\n") for line in gold_file]
 
     if len(predictions) < len(gold):

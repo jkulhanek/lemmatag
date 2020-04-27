@@ -2,6 +2,7 @@ import os
 import sys
 import urllib.request
 import zipfile
+from download_datasets import ensure_dataset_exists
 
 import numpy as np
 
@@ -59,7 +60,7 @@ class MorphoDataset:
 
             in_sentence = False
             for line in data_file:
-                line = line.decode("utf-8").rstrip("\r\n")
+                line = line.rstrip("\r\n")
                 if line:
                     columns = line.split("\t")
                     for f in range(self.FACTORS):
@@ -145,17 +146,14 @@ class MorphoDataset:
                 yield batch
 
 
-    def __init__(self, dataset, add_bow_eow=False, max_sentences=None):
-        path = "{}.zip".format(dataset)
-        if not os.path.exists(path):
-            print("Downloading dataset {}...".format(dataset), file=sys.stderr)
-            urllib.request.urlretrieve("{}/{}".format(self._URL, path), filename=path)
-
-        with zipfile.ZipFile(path, "r") as zip_file:
-            for dataset in ["train", "dev", "test"]:
-                with zip_file.open("{}_{}.txt".format(os.path.splitext(path)[0], dataset), "r") as dataset_file:
-                    setattr(self, dataset, self.Dataset(dataset_file,
-                                                        train=self.train if dataset != "train" else None,
-                                                        shuffle_batches=dataset == "train",
-                                                        add_bow_eow=add_bow_eow,
-                                                        max_sentences=max_sentences))
+    def __init__(self, add_bow_eow=False, max_sentences=None):
+        data_folder = os.environ['DATASETS_PATH'] if 'DATASETS_PATH' in os.environ else os.path.expanduser('~/datasets')
+        ensure_dataset_exists(data_folder)
+        dataset_path = os.path.join(data_folder, 'ud-treebanks-v2.2/UD_Czech-PDT') 
+        for dataset in ["train", "dev", "test"]:
+            with open(os.path.join(dataset_path, f'cs_pdt-ud-{dataset}.lemmatag'), 'r') as dataset_file:
+                setattr(self, dataset, self.Dataset(dataset_file,
+                                                    train=self.train if dataset != "train" else None,
+                                                    shuffle_batches=dataset == "train",
+                                                    add_bow_eow=add_bow_eow,
+                                                    max_sentences=max_sentences))

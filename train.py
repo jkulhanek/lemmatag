@@ -269,7 +269,7 @@ class Network:
 
 def output_predictions(model, dataset_type, out_path='tagger-competition-{dataset}.txt'):
     out_path = out_path.format(dataset=dataset_type) 
-    morpho = MorphoDataset("czech_pdt", max_sentences=NUM_TEST_SENTENCES if model.args.test else None)
+    morpho = MorphoDataset(max_sentences=NUM_TEST_SENTENCES if model.args.test else None)
     dataset = getattr(morpho, dataset_type)
     with open(out_path, "w", encoding="utf-8") as out_file:
         for i, sentence in enumerate(network.predict(dataset)):
@@ -316,7 +316,7 @@ if __name__ == "__main__":
     tf.random.set_seed(args.seed)
 
     # Load the data
-    morpho = MorphoDataset("czech_pdt", max_sentences=NUM_TEST_SENTENCES if args.test else None)
+    morpho = MorphoDataset(max_sentences=NUM_TEST_SENTENCES if args.test else None)
     tag_configurations = list(collect_tag_configurations(args, morpho.train))
 
     # Create the network and train
