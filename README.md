@@ -17,7 +17,7 @@ python train.py --scheduler lemmatag --we-dim 768 --encoder-layers 2 --name tagg
 ## Tagger results
 For tagger alone, the training results including the pre-trained models can be found on wandb: https://app.wandb.ai/kulhanek/tagger?workspace=user-kulhanek
 | configuration  | scheduler | encoder-layers | we-dim | dev accuracy | test accuracy | test accuracy reported in [1] |
-|----------------|-----------|----------------|--------|--------------|---------------|-------------------------------|
+|----------------|-----------|----------------|--------|-------------:|--------------:|------------------------------:|
 | lemmatag       | lemmatag  | 2              | 768    | 97.17        |               | 96.83                         |
 | cosine         | cosine    | 2              | 768    | 97.22        |               |                               |
 | 3-layers       | cosine    | 3              | 628    | 97.23        |               |                               |
