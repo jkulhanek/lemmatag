@@ -144,7 +144,7 @@ def build_prepare_tag_target(dataset, tag_configurations):
         targets = [np_onehot(word_ids, tag_configurations[0].num_values)]
         batch_words = [words[x] for x in word_ids.reshape((-1,))]
         for i, x in enumerate(tag_configurations[1:]):
-            target = [x.lookup.get(w[i], 1) if w not in metawords else x.lookup[w] for w in batch_words]
+            target = [x.lookup.get(w[i], 1) if w not in metawords else x.lookup.get(w, 1) for w in batch_words]
             target = np.array(target, np.int32).reshape(word_ids.shape)
             targets.append(np_onehot(target, x.num_values))
         return targets 
