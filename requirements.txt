@@ -1,0 +1,4 @@
+tensorflow==2.2.0-rc2
+git+https://github.com/tensorflow/addons.git@r0.9  
+wandb
+numpy
