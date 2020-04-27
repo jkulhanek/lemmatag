@@ -21,7 +21,7 @@ For tagger alone, the training results including the pre-trained models can be f
 | lemmatag       | lemmatag  | 2              | 768    | 97.17        |               | 96.83                         |
 | cosine         | cosine    | 2              | 768    | 97.22        |               |                               |
 | 3-layers       | cosine    | 3              | 628    | 97.23        |               |                               |
-| 4-layers       | cosine    | 4              | 542    |              |               |                               |
+| 4-layers       | cosine    | 4              | 542    | 97.25        |               |                               |
 
 ## References:
 [1] LemmaTag: Jointly Tagging and Lemmatizing for Morphologically-Rich Languages with BRNNs, *Daniel Kondratyuk, Tomáš Gavenčiak, Milan Straka, Jan Hajič* <br/>
