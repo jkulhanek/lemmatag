@@ -267,7 +267,7 @@ class Network:
         return predictions
 
 
-def output_predictions(model, dataset_type, out_path='tagger-competition-{dataset}.txt'):
+def output_predictions(model, dataset_type, out_path='tagger-{dataset}.txt'):
     out_path = out_path.format(dataset=dataset_type) 
     morpho = MorphoDataset(max_sentences=NUM_TEST_SENTENCES if model.args.test else None)
     dataset = getattr(morpho, dataset_type)
