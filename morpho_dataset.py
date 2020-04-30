@@ -2,6 +2,7 @@ import os
 import sys
 import urllib.request
 import zipfile
+import tensorflow as tf
 from download_datasets import ensure_dataset_exists
 
 import numpy as np
@@ -60,7 +61,7 @@ class MorphoDataset:
 
             in_sentence = False
             for line in data_file:
-                line = line.rstrip("\r\n")
+                line = line.decode("utf-8").rstrip("\r\n")
                 if line:
                     columns = line.split("\t")
                     for f in range(self.FACTORS):
@@ -145,13 +146,30 @@ class MorphoDataset:
 
                 yield batch
 
+        def tf_dataset(self):
+            def to_rectangle(charseqs):
+                maxlen = max(map(len, charseqs))
+                result = np.zeros((len(charseqs), maxlen), np.int32)
+                for j, charseq in enumerate(charseqs):
+                    result[j, :len(charseq)] = charseq
+                return result
+
+            def _generate():
+                for i in range(self._size):
+                    yield dict(words = self.data[self.FORMS].word_ids[i],
+                        charseqs = to_rectangle(self.data[self.FORMS].charseqs[i]),
+                        tags = self.data[self.TAGS].word_ids[i],
+                        lemmas = to_rectangle(self.data[self.LEMMAS].charseqs[i]))
+
+            dataset = tf.data.Dataset.from_generator(_generate, dict(words=tf.int32, charseqs=tf.int32, tags=tf.int32, lemmas=tf.int32))
+            return dataset
 
     def __init__(self, add_bow_eow=False, max_sentences=None):
         data_folder = os.environ['DATASETS_PATH'] if 'DATASETS_PATH' in os.environ else os.path.expanduser('~/datasets')
         ensure_dataset_exists(data_folder)
         dataset_path = os.path.join(data_folder, 'ud-treebanks-v2.2/UD_Czech-PDT') 
         for dataset in ["train", "dev", "test"]:
-            with open(os.path.join(dataset_path, f'cs_pdt-ud-{dataset}.lemmatag'), 'r') as dataset_file:
+            with open(os.path.join(dataset_path, f'cs_pdt-ud-{dataset}.lemmatag'), 'rb') as dataset_file:
                 setattr(self, dataset, self.Dataset(dataset_file,
                                                     train=self.train if dataset != "train" else None,
                                                     shuffle_batches=dataset == "train",
