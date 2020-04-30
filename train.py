@@ -77,22 +77,25 @@ class EncoderCell(tf.keras.layers.Layer):
         self.dropout = tf.keras.layers.Dropout(dropout_rate)
         self.features = features
 
-    def call(self, inputs, **kwargs):
-        x = self.rnn(inputs, **kwargs)
-        x = self.dropout(x, **kwargs)
+    def call(self, inputs, training=None, mask=None):
+        x = self.rnn(inputs, training=training, mask=mask)
+        x = self.dropout(x, training=training)
         x += inputs
         return x
 
 class TagDecoder(tf.keras.layers.Layer):
     def __init__(self, tag_configurations):
         super().__init__() 
+        self._compute_output_and_mask_jointly = True 
         self.heads = []
         for tag_config in tag_configurations:
             self.heads.append(
                 tf.keras.layers.Dense(tag_config.num_values, activation='softmax', name=tag_config.name))
 
-    def call(self, x, **kwargs):
-        return [head(x, **kwargs) for head in self.heads]
+    def call(self, x, training=None, mask=None):
+        result = [head(x, training=training) for head in self.heads]
+        for r in result: r._keras_mask = mask
+        return result
 
 class Encoder(tf.keras.layers.Layer):
     def __init__(self, args, num_words, num_chars, unknown_char = 1):
@@ -108,23 +111,23 @@ class Encoder(tf.keras.layers.Layer):
         self.trunk = tf.keras.Sequential([EncoderCell(args.we_dim, args.dropout) for _ in range(args.encoder_layers)])
         self._compute_output_and_mask_jointly = True 
 
-    def call(self, inputs, **kwargs): 
+    def call(self, inputs, training=None): 
         word_ids, charseqs = inputs
-        masked_word_ids = self.masked_layer(word_ids, **kwargs)
-        we = self.we(masked_word_ids, **kwargs)
+        masked_word_ids = self.masked_layer(word_ids, training=training)
+        we = self.we(masked_word_ids, training=training)
         we_mask = we._keras_mask
         valid_words = tf.where(we_mask)
 
         cle = tf.gather_nd(charseqs, valid_words) 
-        cle = self.cle_embedding(cle, **kwargs)
+        cle = self.cle_embedding(cle, training=training)
         cle_mask = cle._keras_mask
-        cle = self.cle(cle, mask=cle_mask, **kwargs)
-        cle = self.cle_dropout(cle, **kwargs) 
+        cle = self.cle(cle, mask=cle_mask, training=training)
+        cle = self.cle_dropout(cle, training=training) 
         cle = tf.scatter_nd(valid_words, cle, [tf.shape(charseqs)[0], tf.shape(charseqs)[1], cle.shape[-1]]) 
 
         joint_embedding = we + cle
-        joint_embedding = self.joint_dropout(joint_embedding, **kwargs)
-        embedding = self.trunk(joint_embedding, mask=we_mask, **kwargs)
+        joint_embedding = self.joint_dropout(joint_embedding, training=training)
+        embedding = self.trunk(joint_embedding, mask=we_mask, training=training)
         return embedding
 
 class Model(tf.keras.Model):
@@ -133,9 +136,9 @@ class Model(tf.keras.Model):
         self.encoder = Encoder(args, num_words, num_chars, unknown_char)
         self.tagger = TagDecoder(tag_configurations)
 
-    def call(self, inputs, **kwargs):
-        we = self.encoder(inputs, **kwargs)
-        tags = self.tagger(we, **kwargs)
+    def call(self, inputs, training=None):
+        we = self.encoder(inputs, training=training)
+        tags = self.tagger(we, training=training, mask=we._keras_mask)
         return tags
 
 
