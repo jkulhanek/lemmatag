@@ -74,16 +74,13 @@ class EncoderCell(tf.keras.layers.Layer):
         self.rnn = tf.keras.layers.Bidirectional(
             tf.keras.layers.LSTM(features, return_sequences=True),
             merge_mode='sum')
-        self.dropout = tf.keras.layers.Dropout(args.dropout)
+        self.dropout = tf.keras.layers.Dropout(dropout_rate)
         self.features = features
-
-    def build(self, input_shape):
-        self.is_residual = self.features == tf.shape(input_shape)[-1] 
 
     def call(self, inputs, **kwargs):
         x = self.rnn(inputs, **kwargs)
         x = self.dropout(x, **kwargs)
-        if self.is_residual: x += inputs
+        x += inputs
         return x
 
 class TagDecoder(tf.keras.layers.Layer):
@@ -139,7 +136,7 @@ class Model(tf.keras.Model):
     def call(self, inputs, **kwargs):
         we = self.encoder(inputs, **kwargs)
         tags = self.tagger(we, **kwargs)
-        return (tags, )
+        return tags
 
 
 def create_model(args, num_words, num_chars, tag_configurations, unknown_char):
@@ -230,7 +227,7 @@ def build_prepare_tag_target(dataset, tag_configurations):
 class Network:
     def __init__(self, args, num_words, tag_configurations, num_chars, unknown_char, prepare_tag_target): 
         self.args = args
-        self.model = create_model(args, num_words, num_chars, tag_configurations, unknown_char) 
+        self.model = Model(args, num_words, num_chars, tag_configurations, unknown_char) 
         self._learning_schedule = LR_SCHEDULES[args.scheduler](args.learning_rate, args.epochs)
         self._optimizer = tfa.optimizers.LazyAdam(args.learning_rate, beta_1=0.9, beta_2=0.99)
         self._loss = [CategoricalCrossentropy(name=f'loss_{x.name}', label_smoothing=args.label_smoothing) for x in tag_configurations]
