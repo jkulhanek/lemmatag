@@ -142,6 +142,41 @@ class Model(tf.keras.Model):
         return (tags, )
 
 
+def create_model(args, num_words, num_chars, tag_configurations, unknown_char):
+    word_ids = tf.keras.layers.Input((None,), dtype=tf.int32, name='word_ids')
+    charseqs = tf.keras.layers.Input((None, None,), dtype=tf.int32, name='charseqs') 
+
+    # We will prepare the word embedding and the character-level embedding
+    masked_word_ids = MaskedLayer(unknown_char, args.word_dropout)(word_ids)
+    we = tf.keras.layers.Embedding(num_words, args.we_dim, mask_zero=True)(masked_word_ids)
+    valid_words = tf.where(word_ids != 0)
+    cle = tf.gather_nd(charseqs, valid_words) 
+    cle = tf.keras.layers.Embedding(num_chars, args.we_dim // 2, mask_zero=True)(cle)
+    cle = tf.keras.layers.Dropout(args.dropout)(cle)
+    cle = tf.keras.layers.Bidirectional(
+        tf.keras.layers.GRU(args.we_dim // 2),
+    )(cle) 
+    cle = tf.scatter_nd(valid_words, cle, [tf.shape(charseqs)[0], tf.shape(charseqs)[1], cle.shape[-1]]) 
+    embedded = FirstMaskAdd()([we, cle]) # Used for better performance, targets are masked in the loss
+
+    # We will build the network trunk 
+    x = embedded
+    x = tf.keras.layers.Dropout(args.dropout)(x)
+    for _ in range(args.encoder_layers): 
+        xres = tf.keras.layers.Bidirectional(
+            tf.keras.layers.LSTM(args.we_dim, return_sequences=True),
+            merge_mode='sum'
+        )(x)
+        xres = tf.keras.layers.Dropout(args.dropout)(xres)
+        x, xres = x + xres, None # Destroy xres variable 
+
+    outputs = []
+    for tag_config in tag_configurations:
+        outputs.append(
+            tf.keras.layers.Dense(tag_config.num_values, activation='softmax', name=tag_config.name)(x))
+    return tf.keras.Model(inputs=[word_ids, charseqs], outputs=outputs)
+
+
 
 # TF FIX - very hacky!
 # https://github.com/tensorflow/tensorflow/pull/369901
@@ -195,7 +230,7 @@ def build_prepare_tag_target(dataset, tag_configurations):
 class Network:
     def __init__(self, args, num_words, tag_configurations, num_chars, unknown_char, prepare_tag_target): 
         self.args = args
-        self.model = Model(args, num_words, num_chars, tag_configurations, unknown_char) 
+        self.model = create_model(args, num_words, num_chars, tag_configurations, unknown_char) 
         self._learning_schedule = LR_SCHEDULES[args.scheduler](args.learning_rate, args.epochs)
         self._optimizer = tfa.optimizers.LazyAdam(args.learning_rate, beta_1=0.9, beta_2=0.99)
         self._loss = [CategoricalCrossentropy(name=f'loss_{x.name}', label_smoothing=args.label_smoothing) for x in tag_configurations]
@@ -216,7 +251,7 @@ class Network:
         if reset_metrics: self.reset_metrics()
         mask = tf.cast(x[0] != 0, tf.float32)
         with tf.GradientTape() as tp:
-            (tagger_pred,) = self.model(x, training=True)
+            tagger_pred = self.model(x, training=True)
             losses = [l(gi, pi, sample_weight=mask) for l, gi, pi in zip(self._loss, y, tagger_pred)]
             tagger_loss = sum(l * w for l, w in zip(losses, self._loss_weights))
             loss = tagger_loss
@@ -238,7 +273,7 @@ class Network:
     def test_on_batch(self, x, y, reset_metrics = False):
         if reset_metrics: self.reset_metrics()
         mask = tf.cast(x[0] != 0, tf.float32)
-        (tagger_pred,) = self.model(x, training=False)
+        tagger_pred = self.model(x, training=False)
         losses = [l(gi, pi, sample_weight=mask) for l, gi, pi in zip(self._loss, y, tagger_pred)]
         tagger_loss = sum(l * w for l, w in zip(losses, self._loss_weights))
         loss = tagger_loss
@@ -299,7 +334,7 @@ class Network:
     def predict(self, dataset):
         predictions = []
         for x, target in dataset:
-            (tagger_preds,) = self.predict_on_batch(x)
+            tagger_preds = self.predict_on_batch(x)
             for pred in tagger_preds[0]:
                 sentence = np.argmax(pred, -1)
                 predictions.append(sentence)
