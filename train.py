@@ -12,6 +12,7 @@ from collections import namedtuple
 from functools import partial
 
 from morpho_dataset import MorphoDataset
+from data import create_pipelines, collect_tag_configurations
 import wandb
 
 NUM_TEST_SENTENCES = 10
@@ -67,40 +68,80 @@ class FirstMaskAdd(tf.keras.layers.Layer):
         if mask is None: return None
         return mask[0]
 
+class EncoderCell(tf.keras.layers.Layer):
+    def __init__(self, features, dropout_rate): 
+        super().__init__()
+        self.rnn = tf.keras.layers.Bidirectional(
+            tf.keras.layers.LSTM(features, return_sequences=True),
+            merge_mode='sum')
+        self.dropout = tf.keras.layers.Dropout(args.dropout)
+        self.features = features
 
-def create_model(args, num_words, tag_configurations, num_chars, unknown_char):
-    word_ids = tf.keras.layers.Input((None,), dtype=tf.int32, name='word_ids')
-    charseqs = tf.keras.layers.Input((None, None,), dtype=tf.int32, name='charseqs') 
+    def build(self, input_shape):
+        self.is_residual = self.features == tf.shape(input_shape)[-1] 
 
-    # We will prepare the word embedding and the character-level embedding
-    masked_word_ids = MaskedLayer(unknown_char, args.word_dropout)(word_ids)
-    we = tf.keras.layers.Embedding(num_words, args.we_dim, mask_zero=True)(masked_word_ids)
-    valid_words = tf.where(word_ids != 0)
-    cle = tf.gather_nd(charseqs, valid_words) 
-    cle = tf.keras.layers.Embedding(num_chars, args.we_dim // 2, mask_zero=True)(cle)
-    cle = tf.keras.layers.Dropout(args.dropout)(cle)
-    cle = tf.keras.layers.Bidirectional(
-        tf.keras.layers.GRU(args.we_dim // 2),
-    )(cle) 
-    cle = tf.scatter_nd(valid_words, cle, [tf.shape(charseqs)[0], tf.shape(charseqs)[1], cle.shape[-1]]) 
-    embedded = FirstMaskAdd()([we, cle]) # Used for better performance, targets are masked in the loss
+    def call(self, inputs, **kwargs):
+        x = self.rnn(inputs, **kwargs)
+        x = self.dropout(x, **kwargs)
+        if self.is_residual: x += inputs
+        return x
 
-    # We will build the network trunk 
-    x = embedded
-    x = tf.keras.layers.Dropout(args.dropout)(x)
-    for _ in range(args.encoder_layers): 
-        xres = tf.keras.layers.Bidirectional(
-            tf.keras.layers.LSTM(args.we_dim, return_sequences=True),
-            merge_mode='sum'
-        )(x)
-        xres = tf.keras.layers.Dropout(args.dropout)(xres)
-        x, xres = x + xres, None # Destroy xres variable 
+class TagDecoder(tf.keras.layers.Layer):
+    def __init__(self, tag_configurations):
+        super().__init__() 
+        self.heads = []
+        for tag_config in tag_configurations:
+            self.heads.append(
+                tf.keras.layers.Dense(tag_config.num_values, activation='softmax', name=tag_config.name))
 
-    outputs = []
-    for tag_config in tag_configurations:
-        outputs.append(
-            tf.keras.layers.Dense(tag_config.num_values, activation='softmax', name=tag_config.name)(x))
-    return tf.keras.Model(inputs=[word_ids, charseqs], outputs=outputs)
+    def call(self, x, **kwargs):
+        return [head(x, **kwargs) for head in self.heads]
+
+class Encoder(tf.keras.layers.Layer):
+    def __init__(self, args, num_words, num_chars, unknown_char = 1):
+        super().__init__()
+        self.masked_layer = MaskedLayer(unknown_char, args.word_dropout)
+        self.we = tf.keras.layers.Embedding(num_words, args.we_dim, mask_zero=True)
+        self.cle_embedding = tf.keras.layers.Embedding(num_chars, args.we_dim // 2, mask_zero=True)
+        self.cle_dropout = tf.keras.layers.Dropout(args.dropout)
+        self.cle = tf.keras.layers.Bidirectional(
+            tf.keras.layers.GRU(args.we_dim // 2),
+        ) 
+        self.joint_dropout = tf.keras.layers.Dropout(args.dropout)
+        self.trunk = tf.keras.Sequential([EncoderCell(args.we_dim, args.dropout) for _ in range(args.encoder_layers)])
+        self._compute_output_and_mask_jointly = True 
+
+    def call(self, inputs, **kwargs): 
+        word_ids, charseqs = inputs
+        masked_word_ids = self.masked_layer(word_ids, **kwargs)
+        we = self.we(masked_word_ids, **kwargs)
+        we_mask = we._keras_mask
+        valid_words = tf.where(we_mask)
+
+        cle = tf.gather_nd(charseqs, valid_words) 
+        cle = self.cle_embedding(cle, **kwargs)
+        cle_mask = cle._keras_mask
+        cle = self.cle(cle, mask=cle_mask, **kwargs)
+        cle = self.cle_dropout(cle, **kwargs) 
+        cle = tf.scatter_nd(valid_words, cle, [tf.shape(charseqs)[0], tf.shape(charseqs)[1], cle.shape[-1]]) 
+
+        joint_embedding = we + cle
+        joint_embedding = self.joint_dropout(joint_embedding, **kwargs)
+        embedding = self.trunk(joint_embedding, mask=we_mask, **kwargs)
+        return embedding
+
+class Model(tf.keras.Model):
+    def __init__(self, args, num_words, num_chars, tag_configurations, unknown_char = 1):
+        super().__init__() 
+        self.encoder = Encoder(args, num_words, num_chars, unknown_char)
+        self.tagger = TagDecoder(tag_configurations)
+
+    def call(self, inputs, **kwargs):
+        we = self.encoder(inputs, **kwargs)
+        tags = self.tagger(we, **kwargs)
+        return (tags, )
+
+
 
 # TF FIX - very hacky!
 # https://github.com/tensorflow/tensorflow/pull/369901
@@ -154,7 +195,7 @@ def build_prepare_tag_target(dataset, tag_configurations):
 class Network:
     def __init__(self, args, num_words, tag_configurations, num_chars, unknown_char, prepare_tag_target): 
         self.args = args
-        self.model = create_model(args, num_words, tag_configurations, num_chars, unknown_char) 
+        self.model = Model(args, num_words, num_chars, tag_configurations, unknown_char) 
         self._learning_schedule = LR_SCHEDULES[args.scheduler](args.learning_rate, args.epochs)
         self._optimizer = tfa.optimizers.LazyAdam(args.learning_rate, beta_1=0.9, beta_2=0.99)
         self._loss = [CategoricalCrossentropy(name=f'loss_{x.name}', label_smoothing=args.label_smoothing) for x in tag_configurations]
@@ -175,8 +216,8 @@ class Network:
         if reset_metrics: self.reset_metrics()
         mask = tf.cast(x[0] != 0, tf.float32)
         with tf.GradientTape() as tp:
-            pred = self.model(x, training=True)
-            losses = [l(gi, pi, sample_weight=mask) for l, gi, pi in zip(self._loss, y, pred)]
+            (tagger_pred,) = self.model(x, training=True)
+            losses = [l(gi, pi, sample_weight=mask) for l, gi, pi in zip(self._loss, y, tagger_pred)]
             tagger_loss = sum(l * w for l, w in zip(losses, self._loss_weights))
             loss = tagger_loss
         grads = tp.gradient(loss, self.model.trainable_variables)
@@ -184,7 +225,7 @@ class Network:
         self._optimizer.apply_gradients(zip(grads, self.model.trainable_variables))
 
         self._metrics['grad_norm'].update_state(grad_norm) 
-        self._metrics['tagger_accuracy'].update_state(y[0], pred[0], mask)
+        self._metrics['tagger_accuracy'].update_state(y[0], tagger_pred[0], mask)
         self._metrics['tagger_loss'].update_state(tagger_loss)
         self._metrics['tagger_loss_direct'].update_state(losses[0])
         self._metrics['tagger_loss_auxiliary'].update_state(sum(losses[1:]))
@@ -197,12 +238,12 @@ class Network:
     def test_on_batch(self, x, y, reset_metrics = False):
         if reset_metrics: self.reset_metrics()
         mask = tf.cast(x[0] != 0, tf.float32)
-        pred = self.model(x, training=False)
-        losses = [l(gi, pi, sample_weight=mask) for l, gi, pi in zip(self._loss, y, pred)]
+        (tagger_pred,) = self.model(x, training=False)
+        losses = [l(gi, pi, sample_weight=mask) for l, gi, pi in zip(self._loss, y, tagger_pred)]
         tagger_loss = sum(l * w for l, w in zip(losses, self._loss_weights))
         loss = tagger_loss
 
-        self._metrics['tagger_accuracy'].update_state(y[0], pred[0], mask)
+        self._metrics['tagger_accuracy'].update_state(y[0], tagger_pred[0], mask)
         self._metrics['tagger_loss'].update_state(tagger_loss)
         self._metrics['tagger_loss_direct'].update_state(losses[0])
         self._metrics['tagger_loss_auxiliary'].update_state(sum(losses[1:]))
@@ -220,7 +261,7 @@ class Network:
         for m in self._metrics.values(): m.reset_states()
 
 
-    def fit(self, train_dataset, dev_dataset):
+    def fit(self, train_dataset, dev_dataset, test_dataset):
         if not self.args.test:
             wandb.init(project=self.args.project, name=self.args.name)
             wandb.config.update(self.args)
@@ -231,15 +272,13 @@ class Network:
             K.set_value(self._optimizer.lr, K.get_value(lr))
             logdict['learning_rate'] = lr
 
-            for batch in train_dataset.batches(self.args.batch_size):
-                target = self._prepare_tag_target(batch)
-                metrics = self.train_on_batch([batch[train_dataset.FORMS].word_ids, batch[train_dataset.FORMS].charseqs], target, reset_metrics=False) 
+            for x, target in train_dataset:
+                metrics = self.train_on_batch(x, target, reset_metrics=False) 
             self.reset_metrics()
             logdict.update({f'train_{n}': v.numpy() for n,v in metrics.items()})
 
-            for batch in dev_dataset.batches(self.args.batch_size):
-                target = self._prepare_tag_target(batch)
-                metrics = self.test_on_batch([batch[dev_dataset.FORMS].word_ids, batch[dev_dataset.FORMS].charseqs], target, reset_metrics=False)
+            for x, target in dev_dataset:
+                metrics = self.test_on_batch(x, target, reset_metrics=False)
             self.reset_metrics()
             logdict.update({f'val_{n}': v.numpy() for n,v in metrics.items()})
 
@@ -250,8 +289,8 @@ class Network:
             # Save model every fifth epoch
             if (epoch + 1) % 5 == 0:
                 self.model.save_weights('model.h5')
-                output_predictions(self, 'dev')
-                output_predictions(self, 'test')
+                output_predictions(self, dev_dataset, 'dev')
+                output_predictions(self, test_dataset, 'test')
                 if not self.args.test:
                     wandb.save('model.h5')
                     wandb.save('tagger-competition-dev.txt')
@@ -259,24 +298,24 @@ class Network:
 
     def predict(self, dataset):
         predictions = []
-        for batch in dataset.batches(self.args.batch_size):
-            preds = self.predict_on_batch([batch[dataset.FORMS].word_ids, batch[dataset.FORMS].charseqs])
-            for pred in preds[0]:
+        for x, target in dataset:
+            (tagger_preds,) = self.predict_on_batch(x)
+            for pred in tagger_preds[0]:
                 sentence = np.argmax(pred, -1)
                 predictions.append(sentence)
         return predictions
 
 
-def output_predictions(model, dataset_type, out_path='tagger-competition-{dataset}.txt'):
+def output_predictions(model, dataset, dataset_type, out_path='tagger-{dataset}.txt'):
     out_path = out_path.format(dataset=dataset_type) 
     morpho = MorphoDataset(max_sentences=NUM_TEST_SENTENCES if model.args.test else None)
-    dataset = getattr(morpho, dataset_type)
+    morpho_dataset = getattr(morpho, dataset_type)
     with open(out_path, "w", encoding="utf-8") as out_file:
         for i, sentence in enumerate(network.predict(dataset)):
-            for j in range(len(dataset.data[dataset.FORMS].word_strings[i])):
-                print(dataset.data[dataset.FORMS].word_strings[i][j],
-                      dataset.data[dataset.LEMMAS].word_strings[i][j],
-                      dataset.data[dataset.TAGS].words[sentence[j]],
+            for j in range(len(morpho_dataset.data[morpho_dataset.FORMS].word_strings[i])):
+                print(morpho_dataset.data[morpho_dataset.FORMS].word_strings[i][j],
+                      morpho_dataset.data[morpho_dataset.LEMMAS].word_strings[i][j],
+                      morpho_dataset.data[morpho_dataset.TAGS].words[sentence[j]],
                       sep="\t", file=out_file)
             print(file=out_file)
 
@@ -328,6 +367,8 @@ if __name__ == "__main__":
         unknown_char=unknown_char,
         prepare_tag_target=build_prepare_tag_target(morpho.train, tag_configurations))
 
+    data_pipelines = create_pipelines(morpho, args, tag_configurations)
+
     print(f'running command "{argstr}"')
-    network.fit(morpho.train, morpho.dev)
+    network.fit(*data_pipelines)
 
