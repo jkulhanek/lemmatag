@@ -177,6 +177,15 @@ def create_model(args, num_words, num_chars, tag_configurations, unknown_char):
     return tf.keras.Model(inputs=[word_ids, charseqs], outputs=outputs)
 
 
+def create_model2(args, num_words, num_chars, tag_configurations, unknown_char):
+    word_ids = tf.keras.layers.Input((None,), dtype=tf.int32, name='word_ids')
+    charseqs = tf.keras.layers.Input((None, None,), dtype=tf.int32, name='charseqs') 
+
+    # We will prepare the word embedding and the character-level embedding
+    embedded = Encoder(args, num_words, num_chars, unknown_char)([word_ids, charseqs])
+    outputs = TagDecoder(tag_configurations)(embedded)
+    return tf.keras.Model(inputs=[word_ids, charseqs], outputs=outputs)
+
 
 # TF FIX - very hacky!
 # https://github.com/tensorflow/tensorflow/pull/369901
@@ -230,7 +239,7 @@ def build_prepare_tag_target(dataset, tag_configurations):
 class Network:
     def __init__(self, args, num_words, tag_configurations, num_chars, unknown_char, prepare_tag_target): 
         self.args = args
-        self.model = Model(args, num_words, num_chars, tag_configurations, unknown_char) 
+        self.model = create_model2(args, num_words, num_chars, tag_configurations, unknown_char) 
         self._learning_schedule = LR_SCHEDULES[args.scheduler](args.learning_rate, args.epochs)
         self._optimizer = tfa.optimizers.LazyAdam(args.learning_rate, beta_1=0.9, beta_2=0.99)
         self._loss = [CategoricalCrossentropy(name=f'loss_{x.name}', label_smoothing=args.label_smoothing) for x in tag_configurations]
