@@ -78,8 +78,6 @@ class TagDecoder(tf.keras.layers.Layer):
 
     def call(self, x, training=None, mask=None):
         result = [head(x, training=training) for head in self.heads]
-        print(tf.shape(x))
-        print(tf.shape(mask))
         for r in result: r._keras_mask = mask
         return result
 
