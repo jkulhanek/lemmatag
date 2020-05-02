@@ -78,6 +78,8 @@ class TagDecoder(tf.keras.layers.Layer):
 
     def call(self, x, training=None, mask=None):
         result = [head(x, training=training) for head in self.heads]
+        print(tf.shape(x))
+        print(tf.shape(mask))
         for r in result: r._keras_mask = mask
         return result
 
@@ -113,6 +115,35 @@ class Encoder(tf.keras.layers.Layer):
         joint_embedding = self.joint_dropout(joint_embedding, training=training)
         embedding = self.trunk(joint_embedding, mask=we_mask, training=training)
         return embedding
+
+def Encoder(args, num_words, num_chars, unknown_char): 
+    word_ids = tf.keras.layers.Input((None,), dtype=tf.int32, name='word_ids')
+    charseqs = tf.keras.layers.Input((None, None,), dtype=tf.int32, name='charseqs') 
+
+    # We will prepare the word embedding and the character-level embedding
+    masked_word_ids = MaskedLayer(unknown_char, args.word_dropout)(word_ids)
+    we = tf.keras.layers.Embedding(num_words, args.we_dim, mask_zero=True)(masked_word_ids)
+    valid_words = tf.where(word_ids != 0)
+    cle = tf.gather_nd(charseqs, valid_words) 
+    cle = tf.keras.layers.Embedding(num_chars, args.we_dim // 2, mask_zero=True)(cle)
+    cle = tf.keras.layers.Dropout(args.dropout)(cle)
+    cle = tf.keras.layers.Bidirectional(
+        tf.keras.layers.GRU(args.we_dim // 2),
+    )(cle) 
+    cle = tf.scatter_nd(valid_words, cle, [tf.shape(charseqs)[0], tf.shape(charseqs)[1], cle.shape[-1]]) 
+    embedded = FirstMaskAdd()([we, cle]) # Used for better performance, targets are masked in the loss
+
+    # We will build the network trunk 
+    x = embedded
+    x = tf.keras.layers.Dropout(args.dropout)(x)
+    for _ in range(args.encoder_layers): 
+        xres = tf.keras.layers.Bidirectional(
+            tf.keras.layers.LSTM(args.we_dim, return_sequences=True),
+            merge_mode='sum'
+        )(x)
+        xres = tf.keras.layers.Dropout(args.dropout)(xres)
+        x = tf.keras.layers.Add()([x, xres])
+    return tf.keras.Model(inputs=[word_ids, charseqs], outputs=[x]) 
 
 def create_model(args, num_words, num_chars, tag_configurations, unknown_char):
     word_ids = tf.keras.layers.Input((None,), dtype=tf.int32, name='word_ids')
@@ -157,6 +188,17 @@ def create_model(args, num_words, num_chars, tag_configurations, unknown_char):
     embedded = Encoder(args, num_words, num_chars, unknown_char)([word_ids, charseqs])
     outputs = TagDecoder(tag_configurations)(embedded)
     return tf.keras.Model(inputs=[word_ids, charseqs], outputs=outputs)
+
+class Model(tf.keras.Model):
+    def __init__(self, args, num_words, num_chars, tag_configurations, unknown_char):
+        super().__init__()
+        self.encoder = Encoder(args, num_words, num_chars, unknown_char)
+        self.tag_decoder = TagDecoder(tag_configurations)
+
+    def call(self, inputs, training=None):
+        encoded = self.encoder(inputs, training=training)
+        tag_outputs = self.tag_decoder(encoded, mask=encoded._keras_mask, training=training)
+        return tag_outputs
 
 
 # TF FIX - very hacky!
@@ -204,7 +246,7 @@ def build_prepare_tag_target(dataset, tag_configurations):
 class Network:
     def __init__(self, args, num_words, tag_configurations, num_chars, unknown_char, prepare_tag_target): 
         self.args = args
-        self.model = create_model(args, num_words, num_chars, tag_configurations, unknown_char) 
+        self.model = Model(args, num_words, num_chars, tag_configurations, unknown_char) 
         self._learning_schedule = LR_SCHEDULES[args.scheduler](args.learning_rate, args.epochs)
         self._optimizer = tfa.optimizers.LazyAdam(args.learning_rate, beta_1=0.9, beta_2=0.99)
         self._loss = [CategoricalCrossentropy(name=f'loss_{x.name}', label_smoothing=args.label_smoothing) for x in tag_configurations]
