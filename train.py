@@ -24,22 +24,6 @@ LR_SCHEDULES = {
     'lemmatag': lambda lr, epochs: partial(lemmatag_learning_schedule, lr),
     'cosine': tf.keras.experimental.CosineDecay}
 
-
-def np_onehot(x, depth, dtype=np.float32):
-    y = np.zeros(tuple(x.shape) + (depth,), dtype=dtype)
-    np.put_along_axis(y, np.expand_dims(x, -1), 1., -1)
-    return y
-
-
-class TagConfiguration:
-    def __init__(self, name, values, weight):
-        self.name = name
-        self.num_values = len(values)
-        self.weight = weight
-        self.alphabet = values
-        self.lookup = {v:i for i,v in enumerate(values)}
-
-
 class MaskedLayer(tf.keras.layers.Layer):
     def __init__(self, mask_character, dropout_rate=0.5, **kwargs):
         super().__init__(**kwargs)
@@ -130,18 +114,6 @@ class Encoder(tf.keras.layers.Layer):
         embedding = self.trunk(joint_embedding, mask=we_mask, training=training)
         return embedding
 
-class Model(tf.keras.Model):
-    def __init__(self, args, num_words, num_chars, tag_configurations, unknown_char = 1):
-        super().__init__() 
-        self.encoder = Encoder(args, num_words, num_chars, unknown_char)
-        self.tagger = TagDecoder(tag_configurations)
-
-    def call(self, inputs, training=None):
-        we = self.encoder(inputs, training=training)
-        tags = self.tagger(we, training=training, mask=we._keras_mask)
-        return tags
-
-
 def create_model(args, num_words, num_chars, tag_configurations, unknown_char):
     word_ids = tf.keras.layers.Input((None,), dtype=tf.int32, name='word_ids')
     charseqs = tf.keras.layers.Input((None, None,), dtype=tf.int32, name='charseqs') 
@@ -177,7 +149,7 @@ def create_model(args, num_words, num_chars, tag_configurations, unknown_char):
     return tf.keras.Model(inputs=[word_ids, charseqs], outputs=outputs)
 
 
-def create_model2(args, num_words, num_chars, tag_configurations, unknown_char):
+def create_model(args, num_words, num_chars, tag_configurations, unknown_char):
     word_ids = tf.keras.layers.Input((None,), dtype=tf.int32, name='word_ids')
     charseqs = tf.keras.layers.Input((None, None,), dtype=tf.int32, name='charseqs') 
 
@@ -214,13 +186,6 @@ def collect_factors(factor_words):
     return factors
         
 
-def collect_tag_configurations(args, dataset):
-    factors = collect_factors(dataset.data[dataset.TAGS].words)
-    yield TagConfiguration('all', dataset.data[dataset.TAGS].words, 1.0)
-    for i, f in enumerate(factors):
-        yield TagConfiguration(f'f{i + 1}', f, 0.1)
-
-
 def build_prepare_tag_target(dataset, tag_configurations):
     words = dataset.data[dataset.TAGS].words
     metawords = words[:2]
@@ -239,7 +204,7 @@ def build_prepare_tag_target(dataset, tag_configurations):
 class Network:
     def __init__(self, args, num_words, tag_configurations, num_chars, unknown_char, prepare_tag_target): 
         self.args = args
-        self.model = create_model2(args, num_words, num_chars, tag_configurations, unknown_char) 
+        self.model = create_model(args, num_words, num_chars, tag_configurations, unknown_char) 
         self._learning_schedule = LR_SCHEDULES[args.scheduler](args.learning_rate, args.epochs)
         self._optimizer = tfa.optimizers.LazyAdam(args.learning_rate, beta_1=0.9, beta_2=0.99)
         self._loss = [CategoricalCrossentropy(name=f'loss_{x.name}', label_smoothing=args.label_smoothing) for x in tag_configurations]
@@ -337,8 +302,8 @@ class Network:
                 output_predictions(self, test_dataset, 'test')
                 if not self.args.test:
                     wandb.save('model.h5')
-                    wandb.save('tagger-competition-dev.txt')
-                    wandb.save('tagger-competition-test.txt')
+                    wandb.save('tagger-dev.txt')
+                    wandb.save('tagger-test.txt')
 
     def predict(self, dataset):
         predictions = []

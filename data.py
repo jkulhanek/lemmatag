@@ -1,6 +1,15 @@
 import numpy as np
 import tensorflow as tf
 
+class TagConfiguration:
+    def __init__(self, name, values, weight):
+        self.name = name
+        self.num_values = len(values)
+        self.weight = weight
+        self.alphabet = values
+        self.lookup = {v:i for i,v in enumerate(values)}
+
+
 def np_onehot(x, depth, dtype=np.float32):
     y = np.zeros(tuple(x.shape) + (depth,), dtype=dtype)
     np.put_along_axis(y, np.expand_dims(x, -1), 1., -1)
@@ -19,12 +28,13 @@ def collect_factors(factor_words):
         
 
 def collect_tag_configurations(args, dataset):
-    def gen():
-        factors = collect_factors(dataset.data[dataset.TAGS].words)
-        yield TagConfiguration('all', dataset.data[dataset.TAGS].words, 1.0)
-        for i, f in enumerate(factors):
-            yield TagConfiguration(f'f{i + 1}', f, 0.1)
-    return gen
+    class _iter:
+        def __iter__(self):
+            factors = collect_factors(dataset.data[dataset.TAGS].words)
+            yield TagConfiguration('all', dataset.data[dataset.TAGS].words, 1.0)
+            for i, f in enumerate(factors):
+                yield TagConfiguration(f'f{i + 1}', f, 0.1)
+    return _iter()
 
 def create_pipelines(morpho_dataset, args, tag_configurations = None):
     if tag_configurations is None:
