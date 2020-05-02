@@ -254,8 +254,8 @@ class Network:
                 output_predictions(self, 'test')
                 if not self.args.test:
                     wandb.save('model.h5')
-                    wandb.save('tagger-competition-dev.txt')
-                    wandb.save('tagger-competition-test.txt')
+                    wandb.save('tagger-dev.txt')
+                    wandb.save('tagger-test.txt')
 
     def predict(self, dataset):
         predictions = []
