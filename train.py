@@ -143,55 +143,97 @@ def Encoder(args, num_words, num_chars, unknown_char):
         x = tf.keras.layers.Add()([x, xres])
     return tf.keras.Model(inputs=[word_ids, charseqs], outputs=[x]) 
 
-def create_model(args, num_words, num_chars, tag_configurations, unknown_char):
-    word_ids = tf.keras.layers.Input((None,), dtype=tf.int32, name='word_ids')
-    charseqs = tf.keras.layers.Input((None, None,), dtype=tf.int32, name='charseqs') 
-
-    # We will prepare the word embedding and the character-level embedding
-    masked_word_ids = MaskedLayer(unknown_char, args.word_dropout)(word_ids)
-    we = tf.keras.layers.Embedding(num_words, args.we_dim, mask_zero=True)(masked_word_ids)
-    valid_words = tf.where(word_ids != 0)
-    cle = tf.gather_nd(charseqs, valid_words) 
-    cle = tf.keras.layers.Embedding(num_chars, args.we_dim // 2, mask_zero=True)(cle)
-    cle = tf.keras.layers.Dropout(args.dropout)(cle)
-    cle = tf.keras.layers.Bidirectional(
-        tf.keras.layers.GRU(args.we_dim // 2),
-    )(cle) 
-    cle = tf.scatter_nd(valid_words, cle, [tf.shape(charseqs)[0], tf.shape(charseqs)[1], cle.shape[-1]]) 
-    embedded = FirstMaskAdd()([we, cle]) # Used for better performance, targets are masked in the loss
-
-    # We will build the network trunk 
-    x = embedded
-    x = tf.keras.layers.Dropout(args.dropout)(x)
-    for _ in range(args.encoder_layers): 
-        xres = tf.keras.layers.Bidirectional(
-            tf.keras.layers.LSTM(args.we_dim, return_sequences=True),
-            merge_mode='sum'
-        )(x)
-        xres = tf.keras.layers.Dropout(args.dropout)(xres)
-        x, xres = x + xres, None # Destroy xres variable 
-
-    outputs = []
-    for tag_config in tag_configurations:
-        outputs.append(
-            tf.keras.layers.Dense(tag_config.num_values, activation='softmax', name=tag_config.name)(x))
-    return tf.keras.Model(inputs=[word_ids, charseqs], outputs=outputs)
-
-
 # def create_model(args, num_words, num_chars, tag_configurations, unknown_char):
 #     word_ids = tf.keras.layers.Input((None,), dtype=tf.int32, name='word_ids')
 #     charseqs = tf.keras.layers.Input((None, None,), dtype=tf.int32, name='charseqs') 
 # 
 #     # We will prepare the word embedding and the character-level embedding
-#     embedded = Encoder(args, num_words, num_chars, unknown_char)([word_ids, charseqs])
-#     outputs = TagDecoder(tag_configurations)(embedded)
+#     masked_word_ids = MaskedLayer(unknown_char, args.word_dropout)(word_ids)
+#     we = tf.keras.layers.Embedding(num_words, args.we_dim, mask_zero=True)(masked_word_ids)
+#     valid_words = tf.where(word_ids != 0)
+#     cle = tf.gather_nd(charseqs, valid_words) 
+#     cle = tf.keras.layers.Embedding(num_chars, args.we_dim // 2, mask_zero=True)(cle)
+#     cle = tf.keras.layers.Dropout(args.dropout)(cle)
+#     cle = tf.keras.layers.Bidirectional(
+#         tf.keras.layers.GRU(args.we_dim // 2),
+#     )(cle) 
+#     cle = tf.scatter_nd(valid_words, cle, [tf.shape(charseqs)[0], tf.shape(charseqs)[1], cle.shape[-1]]) 
+#     embedded = FirstMaskAdd()([we, cle]) # Used for better performance, targets are masked in the loss
+# 
+#     # We will build the network trunk 
+#     x = embedded
+#     x = tf.keras.layers.Dropout(args.dropout)(x)
+#     for _ in range(args.encoder_layers): 
+#         xres = tf.keras.layers.Bidirectional(
+#             tf.keras.layers.LSTM(args.we_dim, return_sequences=True),
+#             merge_mode='sum'
+#         )(x)
+#         xres = tf.keras.layers.Dropout(args.dropout)(xres)
+#         x, xres = x + xres, None # Destroy xres variable 
+# 
+#     outputs = []
+#     for tag_config in tag_configurations:
+#         outputs.append(
+#             tf.keras.layers.Dense(tag_config.num_values, activation='softmax', name=tag_config.name)(x))
 #     return tf.keras.Model(inputs=[word_ids, charseqs], outputs=outputs)
 
+class LemmaDecoder(tf.keras.Model):
+    def __init__(self, args, num_target_chars, bow, eow):
+        super().__init__()
+        self.num_target_chars = num_target_chars
+        self.rnn_dim = args.we_dim 
+        self.target_cle_dim = args.we_dim // 2
+        self.eow, self.bow = eow, bow
+
+    def build(self, input_shape):
+        self.rnn_cell = tf.keras.layers.LSTMCell(self.rnn_dim) 
+        self.attention = tfa.seq2seq.LuongAttention(self.rnn_dim)
+        def cell_input_fn(inputs, attention):
+            return tf.concat([inputs, attention, self._rnn_states_additional_input], -1)
+        self.rnn_cell = tfa.seq2seq.AttentionWrapper(self.rnn_cell, self.attention,
+            cell_input_fn = cell_input_fn, output_attention=False)
+        self.temb = tf.keras.layers.Embedding(self.num_target_chars, self.target_cle_dim) 
+        self.decoder = tf.keras.layers.Dense(self.num_target_chars, activation='softmax')
+
+        training_sampler = tfa.seq2seq.TrainingDecoder(self.temb)
+        self.training_decoder = tfa.seq2seq.BasicDecoder(self.rnn_cell, training_sampler, self.decoder)
+
+        prediction_sampler = tfa.seq2seq.GreedyEmbeddingSampler(self.temb)
+        self.prediction_decoder = tfa.seq2seq.BasicDecoder(self.rnn_cell, prediction_sampler, self.decoder)
+
+    def call(self, inputs, training=None, mask=None):
+        """
+        input is the tuple (we_rnn_outputs, cle_states, target_characters)
+        """
+        if training is None: training = tf.keras.backend.learning_phase()
+        if training:
+            we_rnn_outputs, cle_outputs, cle_states, tag_features, target = inputs
+        else:
+            we_rnn_outputs, cle_outputs, cle_states, tag_features = inputs
+
+        self._rnn_states_additional_input = tf.concat([we_rnn_outputs, cle_states, tag_features], -1)
+        charseqs_lens = tf.reduce_sum(mask[1], 1)
+
+        words_count = tf.shape(we_rnn_outputs)[0]
+        initial_state = self.rnn_cell.get_initial_state(batch_size=words_count).clone(cell_state=[we_rnn_outputs, we_rnn_outputs])
+        if training:
+            results, _, result_lengths = self.training_decoder(cle_states, start_tokens=tf.tile([self.bow], [words_count]), end_token=self.eow,
+                decoder_init_inputs=target)
+
+        else: 
+            self.prediction_decoder.maximum_iterations = tf.reduce_max(charseqs_lens) + 10
+            results, _, result_lengths = self.prediction_decoder(cle_states, start_tokens=tf.tile([self.bow], [words_count]), end_token=self.eow,
+                decoder_init_kwargs=dict(initial_state=initial_state))
+            results = tf.argmax(results, -1, output_type=tf.int32)
+        return results, result_lengths
+
+
 class Model(tf.keras.Model):
-    def __init__(self, args, num_words, num_chars, tag_configurations, unknown_char):
+    def __init__(self, args, num_words, num_chars, tag_configurations, unknown_char, num_target_chars, bow, eow):
         super().__init__()
         self.encoder = Encoder(args, num_words, num_chars, unknown_char)
         self.tag_decoder = TagDecoder(tag_configurations)
+        self.lemmatizer = LemmaDecoder(args, num_target_chars, bow, eow)
 
     def call(self, inputs, training=None):
         encoded = self.encoder(inputs, training=training)
@@ -242,9 +284,9 @@ def build_prepare_tag_target(dataset, tag_configurations):
 
 
 class Network:
-    def __init__(self, args, num_words, tag_configurations, num_chars, unknown_char, prepare_tag_target): 
+    def __init__(self, args, num_words, tag_configurations, num_chars, unknown_char, prepare_tag_target, **kwargs): 
         self.args = args
-        self.model = create_model(args, num_words, num_chars, tag_configurations, unknown_char) 
+        self.model = create_model(args, num_words, num_chars, tag_configurations, unknown_char, **kwargs) 
         self._learning_schedule = LR_SCHEDULES[args.scheduler](args.learning_rate, args.epochs)
         self._optimizer = tfa.optimizers.LazyAdam(args.learning_rate, beta_1=0.9, beta_2=0.99)
         self._loss = [CategoricalCrossentropy(name=f'loss_{x.name}', label_smoothing=args.label_smoothing) for x in tag_configurations]
@@ -414,7 +456,9 @@ if __name__ == "__main__":
         tag_configurations = tag_configurations,
         num_chars=len(morpho.train.data[morpho.train.FORMS].alphabet),
         unknown_char=unknown_char,
-        prepare_tag_target=build_prepare_tag_target(morpho.train, tag_configurations))
+        prepare_tag_target=build_prepare_tag_target(morpho.train, tag_configurations),
+        num_target_chars=len(morpho.train.data[morpho.train.LEMMAS].alphabet),
+        bow=morpho.train.data[morpho.train.LEMMAS].)
 
     data_pipelines = create_pipelines(morpho, args, tag_configurations)
 
