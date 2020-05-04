@@ -128,4 +128,5 @@ dmypy.json
 # Pyre type checker
 .pyre/
 model.h5
+tagger-competition-*.txt
 tagger-*.txt
