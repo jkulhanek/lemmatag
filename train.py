@@ -18,13 +18,6 @@ import wandb
 
 NUM_TEST_SENTENCES = 10
 
-def lemmatag_learning_schedule(lr, epoch):
-    return lr * min(1.0, 0.25 ** (1 + ((epoch - 20) // 10)))
-
-LR_SCHEDULES = {
-    'lemmatag': lambda lr, epochs: partial(lemmatag_learning_schedule, lr),
-    'cosine': tf.keras.experimental.CosineDecay}
-
 class MaskedLayer(tf.keras.layers.Layer):
     def __init__(self, mask_character, dropout_rate=0.5, **kwargs):
         super().__init__(**kwargs)
@@ -53,20 +46,6 @@ class FirstMaskAdd(tf.keras.layers.Layer):
         if mask is None: return None
         return mask[0]
 
-class EncoderCell(tf.keras.layers.Layer):
-    def __init__(self, features, dropout_rate): 
-        super().__init__()
-        self.rnn = tf.keras.layers.Bidirectional(
-            tf.keras.layers.LSTM(features, return_sequences=True),
-            merge_mode='sum')
-        self.dropout = tf.keras.layers.Dropout(dropout_rate)
-        self.features = features
-
-    def call(self, inputs, training=None, mask=None):
-        x = self.rnn(inputs, training=training, mask=mask)
-        x = self.dropout(x, training=training)
-        x += inputs
-        return x
 
 class TagDecoder(tf.keras.layers.Layer):
     def __init__(self, tag_configurations):
@@ -82,38 +61,6 @@ class TagDecoder(tf.keras.layers.Layer):
         for r in result: r._keras_mask = mask
         return result
 
-class Encoder(tf.keras.layers.Layer):
-    def __init__(self, args, num_words, num_chars, unknown_char = 1):
-        super().__init__()
-        self.masked_layer = MaskedLayer(unknown_char, args.word_dropout)
-        self.we = tf.keras.layers.Embedding(num_words, args.we_dim, mask_zero=True)
-        self.cle_embedding = tf.keras.layers.Embedding(num_chars, args.we_dim // 2, mask_zero=True)
-        self.cle_dropout = tf.keras.layers.Dropout(args.dropout)
-        self.cle = tf.keras.layers.Bidirectional(
-            tf.keras.layers.GRU(args.we_dim // 2),
-        ) 
-        self.joint_dropout = tf.keras.layers.Dropout(args.dropout)
-        self.trunk = tf.keras.Sequential([EncoderCell(args.we_dim, args.dropout) for _ in range(args.encoder_layers)])
-        self._compute_output_and_mask_jointly = True 
-
-    def call(self, inputs, training=None): 
-        word_ids, charseqs = inputs
-        masked_word_ids = self.masked_layer(word_ids, training=training)
-        we = self.we(masked_word_ids, training=training)
-        we_mask = we._keras_mask
-        valid_words = tf.where(we_mask)
-
-        cle = tf.gather_nd(charseqs, valid_words) 
-        cle = self.cle_embedding(cle, training=training)
-        cle_mask = cle._keras_mask
-        cle = self.cle(cle, mask=cle_mask, training=training)
-        cle = self.cle_dropout(cle, training=training) 
-        cle = tf.scatter_nd(valid_words, cle, [tf.shape(charseqs)[0], tf.shape(charseqs)[1], cle.shape[-1]]) 
-
-        joint_embedding = we + cle
-        joint_embedding = self.joint_dropout(joint_embedding, training=training)
-        embedding = self.trunk(joint_embedding, mask=we_mask, training=training)
-        return embedding
 
 def Encoder(args, num_words, num_chars, unknown_char): 
     word_ids = tf.keras.layers.Input((None,), dtype=tf.int32, name='word_ids')
@@ -145,39 +92,6 @@ def Encoder(args, num_words, num_chars, unknown_char):
         x = tf.keras.layers.Add()([x, xres])
     return tf.keras.Model(inputs=[word_ids, charseqs], outputs=[x, cle_states, cle_outputs]) 
 
-# def create_model(args, num_words, num_chars, tag_configurations, unknown_char):
-#     word_ids = tf.keras.layers.Input((None,), dtype=tf.int32, name='word_ids')
-#     charseqs = tf.keras.layers.Input((None, None,), dtype=tf.int32, name='charseqs') 
-# 
-#     # We will prepare the word embedding and the character-level embedding
-#     masked_word_ids = MaskedLayer(unknown_char, args.word_dropout)(word_ids)
-#     we = tf.keras.layers.Embedding(num_words, args.we_dim, mask_zero=True)(masked_word_ids)
-#     valid_words = tf.where(word_ids != 0)
-#     cle = tf.gather_nd(charseqs, valid_words) 
-#     cle = tf.keras.layers.Embedding(num_chars, args.we_dim // 2, mask_zero=True)(cle)
-#     cle = tf.keras.layers.Dropout(args.dropout)(cle)
-#     cle = tf.keras.layers.Bidirectional(
-#         tf.keras.layers.GRU(args.we_dim // 2),
-#     )(cle) 
-#     cle = tf.scatter_nd(valid_words, cle, [tf.shape(charseqs)[0], tf.shape(charseqs)[1], cle.shape[-1]]) 
-#     embedded = FirstMaskAdd()([we, cle]) # Used for better performance, targets are masked in the loss
-# 
-#     # We will build the network trunk 
-#     x = embedded
-#     x = tf.keras.layers.Dropout(args.dropout)(x)
-#     for _ in range(args.encoder_layers): 
-#         xres = tf.keras.layers.Bidirectional(
-#             tf.keras.layers.LSTM(args.we_dim, return_sequences=True),
-#             merge_mode='sum'
-#         )(x)
-#         xres = tf.keras.layers.Dropout(args.dropout)(xres)
-#         x, xres = x + xres, None # Destroy xres variable 
-# 
-#     outputs = []
-#     for tag_config in tag_configurations:
-#         outputs.append(
-#             tf.keras.layers.Dense(tag_config.num_values, activation='softmax', name=tag_config.name)(x))
-#     return tf.keras.Model(inputs=[word_ids, charseqs], outputs=outputs)
 
 class LemmaDecoder(tf.keras.Model):
     def __init__(self, args, num_target_chars, bow, eow):
@@ -313,7 +227,7 @@ class Network:
         self.eow = eow
         self.model = Model(args, num_words, num_chars, tag_configurations, unknown_char, 
             num_target_chars=num_target_chars, eow=eow, **kwargs) 
-        self._learning_schedule = LR_SCHEDULES[args.scheduler](args.learning_rate, args.epochs)
+        self._learning_schedule = tf.keras.experimental.CosineDecay(args.learning_rate, args.epochs)
         self._optimizer = tfa.optimizers.LazyAdam(args.learning_rate, beta_1=0.9, beta_2=0.99)
         self._metrics = {
             'tagger_accuracy': tf.metrics.CategoricalAccuracy(),
@@ -449,8 +363,8 @@ class Network:
                 output_predictions(self, self.predict(test_dataset), 'test')
                 if not self.args.test:
                     wandb.save('model.h5')
-                    wandb.save('tagger-dev.txt')
-                    wandb.save('tagger-test.txt')
+                    wandb.save('predictions-dev.txt')
+                    wandb.save('predictions-test.txt')
 
     def predict(self, dataset):
         def crop_lemma(lemma):
@@ -469,7 +383,7 @@ class Network:
         return predictions
 
 
-def output_predictions(model, predictions, dataset_type, out_path='tagger-{dataset}.txt'):
+def output_predictions(model, predictions, dataset_type, out_path='predictions-{dataset}.txt'):
     out_path = out_path.format(dataset=dataset_type) 
     morpho = MorphoDataset(max_sentences=NUM_TEST_SENTENCES if model.args.test else None)
     morpho_dataset = getattr(morpho, dataset_type)
