@@ -47,27 +47,37 @@ def create_pipelines(morpho_dataset, args, tag_configurations = None):
     def unflatten_training_data(x):
         return ([x[0], x[1]], [x[i + 2] for i,_ in enumerate(tag_configurations)])
 
+    prepare_training_data_kwargs = dict(
+        unknown_char=morpho_dataset.train.data[morpho_dataset.train.LEMMAS].alphabet_map['<unk>'],
+        eow=morpho_dataset.train.data[morpho_dataset.train.LEMMAS].alphabet_map['<eow>'])
     train = morpho_dataset.train.tf_dataset() \
         .cache() \
         .shuffle(3000) \
         .padded_batch(args.batch_size, padded_batch_shape) \
         .map(add_tag_target_fn) \
-        .map(prepare_training_data) \
+        .map(prepare_training_data(training=True, **prepare_training_data_kwargs)) \
         .prefetch(4)
 
     dev = morpho_dataset.dev.tf_dataset() \
         .cache() \
         .padded_batch(args.batch_size, padded_batch_shape) \
         .map(add_tag_target_fn) \
-        .map(prepare_training_data) \
+        .map(prepare_training_data(training=False, **prepare_training_data_kwargs)) \
         .prefetch(4)
 
     test = morpho_dataset.test.tf_dataset() \
         .padded_batch(args.batch_size, padded_batch_shape) \
         .map(add_tag_target_fn) \
-        .map(prepare_training_data) \
+        .map(prepare_training_data(training=False, **prepare_training_data_kwargs)) \
         .prefetch(4)
     return train, dev, test
+
+def add_eow(charseqs, eow):
+    charseqs = tf.pad(charseqs, [[0,0],[0,1]])
+    indices = tf.reduce_sum(tf.cast(charseqs != 0, tf.int32), -1)
+    updates = tf.tile([eow], [tf.shape(indices)[0]])
+    indices = tf.stack([tf.range(tf.shape(indices)[0]), indices], -1)
+    return tf.tensor_scatter_nd_update(charseqs, indices, updates) 
 
 
 def add_tag_target(dataset, tag_configurations):
@@ -92,6 +102,16 @@ def add_tag_target(dataset, tag_configurations):
         return x
     return fn
 
-@tf.function
-def prepare_training_data(x):
-    return (x['words'], x['charseqs']), x['tags']
+def prepare_training_data(unknown_char, eow, training=False):
+    @tf.function
+    def fn(x):
+        inputs = (x['words'], x['charseqs'])
+        if training: inputs = inputs + (x['lemmas'],)
+
+        # Prepare lemma target
+        valid_words = tf.where(inputs[0] != 0)
+        lemma_target = tf.gather_nd(x['lemmas'], valid_words)
+        lemma_target = add_eow(lemma_target, eow)
+
+        return inputs, (x['tags'], lemma_target,)
+    return fn

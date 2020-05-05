@@ -10,6 +10,7 @@ import tensorflow_addons as tfa
 import tensorflow.keras.backend as K
 from collections import namedtuple
 from functools import partial
+from itertools import chain
 
 from morpho_dataset import MorphoDataset
 from data import create_pipelines, collect_tag_configurations
@@ -125,10 +126,11 @@ def Encoder(args, num_words, num_chars, unknown_char):
     cle = tf.gather_nd(charseqs, valid_words) 
     cle = tf.keras.layers.Embedding(num_chars, args.we_dim // 2, mask_zero=True)(cle)
     cle = tf.keras.layers.Dropout(args.dropout)(cle)
-    cle = tf.keras.layers.Bidirectional(
-        tf.keras.layers.GRU(args.we_dim // 2),
+    cle_outputs, cle_state_fwd, cle_state_bwd = tf.keras.layers.Bidirectional(
+        tf.keras.layers.GRU(args.we_dim // 2, return_sequences=True, return_state=True),
     )(cle) 
-    cle = tf.scatter_nd(valid_words, cle, [tf.shape(charseqs)[0], tf.shape(charseqs)[1], cle.shape[-1]]) 
+    cle_states = tf.keras.layers.Concatenate(-1)([cle_state_fwd, cle_state_bwd])
+    cle = tf.scatter_nd(valid_words, cle_states, [tf.shape(charseqs)[0], tf.shape(charseqs)[1], cle_states.shape[-1]]) 
     embedded = FirstMaskAdd()([we, cle]) # Used for better performance, targets are masked in the loss
 
     # We will build the network trunk 
@@ -141,7 +143,7 @@ def Encoder(args, num_words, num_chars, unknown_char):
         )(x)
         xres = tf.keras.layers.Dropout(args.dropout)(xres)
         x = tf.keras.layers.Add()([x, xres])
-    return tf.keras.Model(inputs=[word_ids, charseqs], outputs=[x]) 
+    return tf.keras.Model(inputs=[word_ids, charseqs], outputs=[x, cle_states, cle_outputs]) 
 
 # def create_model(args, num_words, num_chars, tag_configurations, unknown_char):
 #     word_ids = tf.keras.layers.Input((None,), dtype=tf.int32, name='word_ids')
@@ -193,39 +195,39 @@ class LemmaDecoder(tf.keras.Model):
         self.rnn_cell = tfa.seq2seq.AttentionWrapper(self.rnn_cell, self.attention,
             cell_input_fn = cell_input_fn, output_attention=False)
         self.temb = tf.keras.layers.Embedding(self.num_target_chars, self.target_cle_dim) 
-        self.decoder = tf.keras.layers.Dense(self.num_target_chars, activation='softmax')
+        self.decoder = tf.keras.layers.Dense(self.num_target_chars)
 
-        training_sampler = tfa.seq2seq.TrainingDecoder(self.temb)
+        training_sampler = tfa.seq2seq.TrainingSampler()
         self.training_decoder = tfa.seq2seq.BasicDecoder(self.rnn_cell, training_sampler, self.decoder)
 
         prediction_sampler = tfa.seq2seq.GreedyEmbeddingSampler(self.temb)
         self.prediction_decoder = tfa.seq2seq.BasicDecoder(self.rnn_cell, prediction_sampler, self.decoder)
 
-    def call(self, inputs, training=None, mask=None):
+    def call(self, inputs, training=None, mask=None, target=None):
         """
-        input is the tuple (we_rnn_outputs, cle_states, target_characters)
+        input is the tuple (word_ids, we_rnn_outputs, cle_outputs, cle_states, tag_features, target_characters)
         """
         if training is None: training = tf.keras.backend.learning_phase()
+        we_rnn_outputs, cle_outputs, cle_states, charseqs_lens, tag_features = inputs 
         if training:
-            we_rnn_outputs, cle_outputs, cle_states, tag_features, target = inputs
-        else:
-            we_rnn_outputs, cle_outputs, cle_states, tag_features = inputs
+            target_lens = tf.reduce_sum(tf.cast(target != 0, tf.int32), -1)
+            target = tf.pad(target, [[0,0],[1,0]], constant_values=self.bow)[:,:-1]
 
-        self._rnn_states_additional_input = tf.concat([we_rnn_outputs, cle_states, tag_features], -1)
-        charseqs_lens = tf.reduce_sum(mask[1], 1)
-
+        self.attention.setup_memory(cle_outputs, memory_sequence_length=charseqs_lens)
+        self._rnn_states_additional_input = tf.concat([we_rnn_outputs, cle_states, tag_features], -1) 
         words_count = tf.shape(we_rnn_outputs)[0]
-        initial_state = self.rnn_cell.get_initial_state(batch_size=words_count).clone(cell_state=[we_rnn_outputs, we_rnn_outputs])
+        initial_state = self.rnn_cell.get_initial_state(batch_size=words_count, dtype=tf.float32) \
+            .clone(cell_state=[we_rnn_outputs, we_rnn_outputs])
         if training:
-            results, _, result_lengths = self.training_decoder(cle_states, start_tokens=tf.tile([self.bow], [words_count]), end_token=self.eow,
-                decoder_init_inputs=target)
+            target_emb = self.temb(target)
+            results, _, result_lengths = self.training_decoder(target_emb,
+                initial_state=initial_state, sequence_length=target_lens)
 
         else: 
             self.prediction_decoder.maximum_iterations = tf.reduce_max(charseqs_lens) + 10
-            results, _, result_lengths = self.prediction_decoder(cle_states, start_tokens=tf.tile([self.bow], [words_count]), end_token=self.eow,
-                decoder_init_kwargs=dict(initial_state=initial_state))
-            results = tf.argmax(results, -1, output_type=tf.int32)
-        return results, result_lengths
+            results, _, result_lengths = self.prediction_decoder(None, start_tokens=tf.tile([self.bow], [words_count]), 
+                end_token=self.eow, initial_state=initial_state)
+        return tf.nn.softmax(results.rnn_output), results.sample_id, result_lengths
 
 
 class Model(tf.keras.Model):
@@ -235,10 +237,22 @@ class Model(tf.keras.Model):
         self.tag_decoder = TagDecoder(tag_configurations)
         self.lemmatizer = LemmaDecoder(args, num_target_chars, bow, eow)
 
-    def call(self, inputs, training=None):
-        encoded = self.encoder(inputs, training=training)
+    def call(self, inputs, training_targets=None, training=None):
+        encoded, cle_states, cle_outputs = self.encoder(inputs, training=training)
         tag_outputs = self.tag_decoder(encoded, mask=encoded._keras_mask, training=training)
-        return tag_outputs
+
+        # Prepare target for lemmatizer
+        tag_features = tf.stop_gradient(tf.concat(tag_outputs, -1))
+        word_ids = inputs[0]
+        valid_words = tf.where(word_ids != 0)
+        we_rnn_outputs = tf.gather_nd(encoded, valid_words)
+        tag_features = tf.gather_nd(tag_features, valid_words)
+        cle_seq_lengths = tf.reduce_sum(tf.cast(tf.gather_nd(inputs[1] != 0, valid_words), tf.int32), -1)
+
+        inputs = [we_rnn_outputs, cle_outputs, cle_states, cle_seq_lengths, tag_features]
+        lemma_outputs = self.lemmatizer(inputs, target=training_targets,
+                mask=encoded._keras_mask, training=training)
+        return (tag_outputs, lemma_outputs)
 
 
 # TF FIX - very hacky!
@@ -284,16 +298,19 @@ def build_prepare_tag_target(dataset, tag_configurations):
 
 
 class Network:
-    def __init__(self, args, num_words, tag_configurations, num_chars, unknown_char, prepare_tag_target, **kwargs): 
+    def __init__(self, args, num_words, tag_configurations, num_chars, unknown_char, prepare_tag_target,
+            num_target_chars, eow, **kwargs): 
         self.args = args
-        self.model = create_model(args, num_words, num_chars, tag_configurations, unknown_char, **kwargs) 
+        self.eow = eow
+        self.model = Model(args, num_words, num_chars, tag_configurations, unknown_char, 
+            num_target_chars=num_target_chars, eow=eow, **kwargs) 
         self._learning_schedule = LR_SCHEDULES[args.scheduler](args.learning_rate, args.epochs)
         self._optimizer = tfa.optimizers.LazyAdam(args.learning_rate, beta_1=0.9, beta_2=0.99)
-        self._loss = [CategoricalCrossentropy(name=f'loss_{x.name}', label_smoothing=args.label_smoothing) for x in tag_configurations]
-        self._loss_weights = [x.weight for x in tag_configurations]
         self._metrics = {
             'tagger_accuracy': tf.metrics.CategoricalAccuracy(),
+            'lemmatizer_accuracy': tf.metrics.Accuracy(),
             'tagger_loss': tf.metrics.Mean(),
+            'lemmatizer_loss': tf.metrics.Mean(),
             'grad_norm': tf.metrics.Mean(),
             'tagger_loss_direct': tf.metrics.Mean(),
             'tagger_loss_auxiliary': tf.metrics.Mean(),
@@ -301,25 +318,60 @@ class Network:
         }
         self._tag_configurations = tag_configurations 
         self._prepare_tag_target = prepare_tag_target
+        self._tag_criterion = self.build_tagger_criterion(args, tag_configurations)
+        self._lemma_criterion = self.build_lemmatizer_criterion(args, num_target_chars)
+        
+    def build_tagger_criterion(self, args, tag_configurations): 
+        criterion = [CategoricalCrossentropy(name=f'tagger_loss_{x.name}', label_smoothing=args.label_smoothing) for x in tag_configurations]
+        tagger_loss_weights = [x.weight for x in tag_configurations]
+        def fn(pred, target, mask):
+            losses = [l(gi, pi, sample_weight=mask) for l, gi, pi in zip(criterion, target, pred)]
+            tagger_loss = sum(l * w for l, w in zip(losses, tagger_loss_weights))
+            self._metrics['tagger_accuracy'].update_state(target[0], pred[0], mask)
+            self._metrics['tagger_loss_direct'].update_state(losses[0])
+            self._metrics['tagger_loss_auxiliary'].update_state(sum(losses[1:]))
+            self._metrics['tagger_loss'].update_state(tagger_loss)
+            return tagger_loss
+        return fn
+
+    def build_lemmatizer_criterion(self, args, num_target_chars): 
+        criterion = CategoricalCrossentropy(name='lemmatizer_loss', label_smoothing=args.label_smoothing)
+        def fn(pred, target, training=True):
+            pred_value, pred_ids, _ = pred
+            mask = tf.cast(target != 0, tf.float32)
+            target_onehot = tf.one_hot(target, num_target_chars)
+            if not training:
+                # align the predictions to target len
+                pred_value = pred_value[:,:tf.shape(target)[1],:]
+                pred_ids = pred_ids[:,:tf.shape(target)[1]]
+                padding = tf.shape(target)[1] - tf.shape(pred_value)[1]
+                if padding > 0:
+                    pred_value = tf.pad(pred_value, [[0,0],[0, padding],[0,0]],
+                        constant_values=1.0/tf.cast(tf.shape(pred_value)[-1], tf.float32))
+                    pred_ids = tf.pad(pred_ids, [[0,0],[0, padding]])
+            loss = criterion(target_onehot, pred_value, sample_weight=mask)
+            self._metrics['lemmatizer_loss'].update_state(loss)
+            self._metrics['lemmatizer_accuracy'].update_state(target, pred_ids, mask)
+            return loss
+        return fn
 
     @tf.function(experimental_relax_shapes = True)
     def train_on_batch(self, x, y, reset_metrics = True):
         if reset_metrics: self.reset_metrics()
-        mask = tf.cast(x[0] != 0, tf.float32)
+        tagger_target, lemmatizer_target = y
+        tagger_mask = tf.cast(x[0] != 0, tf.float32)
         with tf.GradientTape() as tp:
-            tagger_pred = self.model(x, training=True)
-            losses = [l(gi, pi, sample_weight=mask) for l, gi, pi in zip(self._loss, y, tagger_pred)]
-            tagger_loss = sum(l * w for l, w in zip(losses, self._loss_weights))
-            loss = tagger_loss
+            # Passing lemmatizer target for teacher-forcing
+            tagger_pred, lemmatizer_pred = self.model(x, training_targets=lemmatizer_target, training=True)
+            tagger_loss = self._tag_criterion(tagger_pred, tagger_target, tagger_mask)
+            lemmatizer_loss = self._lemma_criterion(lemmatizer_pred, lemmatizer_target)
+            loss = tagger_loss + lemmatizer_loss
+
         grads = tp.gradient(loss, self.model.trainable_variables)
         grads, grad_norm = tf.clip_by_global_norm(grads, self.args.grad_clip)
         self._optimizer.apply_gradients(zip(grads, self.model.trainable_variables))
 
         self._metrics['grad_norm'].update_state(grad_norm) 
-        self._metrics['tagger_accuracy'].update_state(y[0], tagger_pred[0], mask)
-        self._metrics['tagger_loss'].update_state(tagger_loss)
-        self._metrics['tagger_loss_direct'].update_state(losses[0])
-        self._metrics['tagger_loss_auxiliary'].update_state(sum(losses[1:]))
         self._metrics['loss'].update_state(loss) 
         result = { k: v.result() for k, v in self._metrics.items() }
         return result
@@ -328,16 +380,14 @@ class Network:
     @tf.function(experimental_relax_shapes = True)
     def test_on_batch(self, x, y, reset_metrics = False):
         if reset_metrics: self.reset_metrics()
-        mask = tf.cast(x[0] != 0, tf.float32)
-        tagger_pred = self.model(x, training=False)
-        losses = [l(gi, pi, sample_weight=mask) for l, gi, pi in zip(self._loss, y, tagger_pred)]
-        tagger_loss = sum(l * w for l, w in zip(losses, self._loss_weights))
-        loss = tagger_loss
+        tagger_target, lemmatizer_target = y
+        tagger_mask = tf.cast(x[0] != 0, tf.float32)
+        with tf.GradientTape() as tp:
+            tagger_pred, lemmatizer_pred = self.model(x, training=False)
+            tagger_loss = self._tag_criterion(tagger_pred, tagger_target, tagger_mask)
+            lemmatizer_loss = self._lemma_criterion(lemmatizer_pred, lemmatizer_target,training=False)
+            loss = tagger_loss + lemmatizer_loss
 
-        self._metrics['tagger_accuracy'].update_state(y[0], tagger_pred[0], mask)
-        self._metrics['tagger_loss'].update_state(tagger_loss)
-        self._metrics['tagger_loss_direct'].update_state(losses[0])
-        self._metrics['tagger_loss_auxiliary'].update_state(sum(losses[1:]))
         self._metrics['loss'].update_state(loss) 
         result = { k: v.result() for k, v in self._metrics.items() }
         del result['grad_norm']
@@ -346,7 +396,12 @@ class Network:
 
     @tf.function(experimental_relax_shapes = True)
     def predict_on_batch(self, x):
-        return self.model(x, training=False)
+        tagger_pred, lemmatizer_pred = self.model(x, training=False)
+        tags = tf.argmax(tagger_pred[0], -1, tf.int32)
+        valid_words = tf.where(x[0] != 0)
+        lemmas = lemmatizer_pred[1]
+        lemmas = tf.scatter_nd(valid_words, lemmas, [tf.shape(tags)[0], tf.shape(tags)[1], tf.shape(lemmas)[-1]])
+        return tags, lemmas
 
     def reset_metrics(self):
         for m in self._metrics.values(): m.reset_states()
@@ -368,45 +423,54 @@ class Network:
             self.reset_metrics()
             logdict.update({f'train_{n}': v.numpy() for n,v in metrics.items()})
 
+
             for x, target in dev_dataset:
                 metrics = self.test_on_batch(x, target, reset_metrics=False)
             self.reset_metrics()
             logdict.update({f'val_{n}': v.numpy() for n,v in metrics.items()})
 
-            print(f'epoch: {logdict["epoch"]}, loss: {logdict["train_tagger_loss"]:.4f}, grad_norm: {logdict["train_grad_norm"]:.4f}, val_loss: {logdict["val_tagger_loss"]:.4f}, accuracy: {logdict["val_tagger_accuracy"]:.4f}')
+            print('epoch: {epoch}, loss: {train_loss:.4f}, grad_norm: {train_grad_norm:.4f}, val_loss: {val_loss:.4f}, lemmatizer acc.: {val_lemmatizer_accuracy:.4f}, tagger acc.: {val_tagger_accuracy:.4f}'.format(**logdict))
             if not self.args.test:
                 wandb.log(logdict, step=epoch + 1)
 
             # Save model every fifth epoch
             if (epoch + 1) % 5 == 0:
                 self.model.save_weights('model.h5')
-                output_predictions(self, dev_dataset, 'dev')
-                output_predictions(self, test_dataset, 'test')
+                output_predictions(self, self.predict(dev_dataset), 'dev')
+                output_predictions(self, self.predict(test_dataset), 'test')
                 if not self.args.test:
                     wandb.save('model.h5')
                     wandb.save('tagger-dev.txt')
                     wandb.save('tagger-test.txt')
 
     def predict(self, dataset):
+        def crop_lemma(lemma):
+            res = []
+            for c in map(int, lemma):
+                if c == self.eow: break
+                res.append(c)
+            return res
+
         predictions = []
         for x, target in dataset:
-            tagger_preds = self.predict_on_batch(x)
-            for pred in tagger_preds[0]:
-                sentence = np.argmax(pred, -1)
-                predictions.append(sentence)
+            preds = self.predict_on_batch(x)
+            for tags, lemmas in zip(*preds):
+                lemmas = list(map(crop_lemma, lemmas))
+                predictions.append((tags, lemmas))
         return predictions
 
 
-def output_predictions(model, dataset_type, out_path='tagger-{dataset}.txt'):
+def output_predictions(model, predictions, dataset_type, out_path='tagger-{dataset}.txt'):
     out_path = out_path.format(dataset=dataset_type) 
     morpho = MorphoDataset(max_sentences=NUM_TEST_SENTENCES if model.args.test else None)
     morpho_dataset = getattr(morpho, dataset_type)
     with open(out_path, "w", encoding="utf-8") as out_file:
-        for i, sentence in enumerate(network.predict(dataset)):
+        for i, (tags, lemmas) in enumerate(predictions):
             for j in range(len(morpho_dataset.data[morpho_dataset.FORMS].word_strings[i])):
+                lemma_string = ''.join(morpho_dataset.data[morpho_dataset.LEMMAS].alphabet[x] for x in lemmas[j])
                 print(morpho_dataset.data[morpho_dataset.FORMS].word_strings[i][j],
-                      morpho_dataset.data[morpho_dataset.LEMMAS].word_strings[i][j],
-                      morpho_dataset.data[morpho_dataset.TAGS].words[sentence[j]],
+                      lemma_string,
+                      morpho_dataset.data[morpho_dataset.TAGS].words[tags[j]],
                       sep="\t", file=out_file)
             print(file=out_file)
 
@@ -458,10 +522,12 @@ if __name__ == "__main__":
         unknown_char=unknown_char,
         prepare_tag_target=build_prepare_tag_target(morpho.train, tag_configurations),
         num_target_chars=len(morpho.train.data[morpho.train.LEMMAS].alphabet),
-        bow=morpho.train.data[morpho.train.LEMMAS].)
+        bow = morpho.train.data[morpho.train.LEMMAS].alphabet_map['<bow>'],
+        eow = morpho.train.data[morpho.train.LEMMAS].alphabet_map['<eow>'])
 
     data_pipelines = create_pipelines(morpho, args, tag_configurations)
 
     print(f'running command "{argstr}"')
     network.fit(*data_pipelines)
+
 
