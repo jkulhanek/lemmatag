@@ -449,8 +449,8 @@ class Network:
                 output_predictions(self, self.predict(test_dataset), 'test')
                 if not self.args.test:
                     wandb.save('model.h5')
-                    wandb.save('tagger-dev.txt')
-                    wandb.save('tagger-test.txt')
+                    wandb.save('lemmatag-dev.txt')
+                    wandb.save('lemmatag-test.txt')
 
     def predict(self, dataset):
         def crop_lemma(lemma):
@@ -469,7 +469,7 @@ class Network:
         return predictions
 
 
-def output_predictions(model, predictions, dataset_type, out_path='tagger-{dataset}.txt'):
+def output_predictions(model, predictions, dataset_type, out_path='lemmatag-{dataset}.txt'):
     out_path = out_path.format(dataset=dataset_type) 
     morpho = MorphoDataset(max_sentences=NUM_TEST_SENTENCES if model.args.test else None)
     morpho_dataset = getattr(morpho, dataset_type)
