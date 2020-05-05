@@ -146,23 +146,6 @@ class MorphoDataset:
 
                 yield batch
 
-        def tf_dataset(self):
-            def to_rectangle(charseqs):
-                maxlen = max(map(len, charseqs))
-                result = np.zeros((len(charseqs), maxlen), np.int32)
-                for j, charseq in enumerate(charseqs):
-                    result[j, :len(charseq)] = charseq
-                return result
-
-            def _generate():
-                for i in range(self._size):
-                    yield dict(words = self.data[self.FORMS].word_ids[i],
-                        charseqs = to_rectangle(self.data[self.FORMS].charseqs[i]),
-                        tags = self.data[self.TAGS].word_ids[i],
-                        lemmas = to_rectangle(self.data[self.LEMMAS].charseqs[i]))
-
-            dataset = tf.data.Dataset.from_generator(_generate, dict(words=tf.int32, charseqs=tf.int32, tags=tf.int32, lemmas=tf.int32))
-            return dataset
 
     def __init__(self, add_bow_eow=False, max_sentences=None):
         data_folder = os.environ['DATASETS_PATH'] if 'DATASETS_PATH' in os.environ else os.path.expanduser('~/datasets')

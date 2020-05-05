@@ -50,7 +50,7 @@ def create_pipelines(morpho_dataset, args, tag_configurations = None):
     prepare_training_data_kwargs = dict(
         unknown_char=morpho_dataset.train.data[morpho_dataset.train.LEMMAS].alphabet_map['<unk>'],
         eow=morpho_dataset.train.data[morpho_dataset.train.LEMMAS].alphabet_map['<eow>'])
-    train = morpho_dataset.train.tf_dataset() \
+    train = morpho_to_tf_dataset(morpho_dataset.train) \
         .cache() \
         .shuffle(3000) \
         .padded_batch(args.batch_size, padded_batch_shape) \
@@ -58,14 +58,14 @@ def create_pipelines(morpho_dataset, args, tag_configurations = None):
         .map(prepare_training_data(training=True, **prepare_training_data_kwargs)) \
         .prefetch(4)
 
-    dev = morpho_dataset.dev.tf_dataset() \
+    dev = morpho_to_tf_dataset(morpho_dataset.dev) \
         .cache() \
         .padded_batch(args.batch_size, padded_batch_shape) \
         .map(add_tag_target_fn) \
         .map(prepare_training_data(training=False, **prepare_training_data_kwargs)) \
         .prefetch(4)
 
-    test = morpho_dataset.test.tf_dataset() \
+    test = morpho_to_tf_dataset(morpho_dataset.test) \
         .padded_batch(args.batch_size, padded_batch_shape) \
         .map(add_tag_target_fn) \
         .map(prepare_training_data(training=False, **prepare_training_data_kwargs)) \
@@ -101,6 +101,25 @@ def add_tag_target(dataset, tag_configurations):
         x['tags'] = tuple(x['tags'])
         return x
     return fn
+
+
+def morpho_to_tf_dataset(morpho):
+    def to_rectangle(charseqs):
+        maxlen = max(map(len, charseqs))
+        result = np.zeros((len(charseqs), maxlen), np.int32)
+        for j, charseq in enumerate(charseqs):
+            result[j, :len(charseq)] = charseq
+        return result
+
+    def _generate():
+        for i in range(morpho.size()):
+            yield dict(words = morpho.data[morpho.FORMS].word_ids[i],
+                charseqs = to_rectangle(morpho.data[morpho.FORMS].charseqs[i]),
+                tags = morpho.data[morpho.TAGS].word_ids[i],
+                lemmas = to_rectangle(morpho.data[morpho.LEMMAS].charseqs[i]))
+
+    dataset = tf.data.Dataset.from_generator(_generate, dict(words=tf.int32, charseqs=tf.int32, tags=tf.int32, lemmas=tf.int32))
+    return dataset
 
 def prepare_training_data(unknown_char, eow, training=False):
     @tf.function
