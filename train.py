@@ -255,6 +255,15 @@ class Model(tf.keras.Model):
         return (tag_outputs, lemma_outputs)
 
 
+class WordAccuracy(tf.keras.metrics.Mean):
+    def __init__(self, name='word_accuracy'):
+        super().__init__(name=name)
+
+    def update_state(self, target, prediction):
+        correct_values = tf.logical_or(target == prediction, target == 0)
+        accuracy = tf.reduce_all(correct_values, -1)
+        super().update_state(accuracy)
+
 # TF FIX - very hacky!
 # https://github.com/tensorflow/tensorflow/pull/369901
 # TODO: remove after fixed in TF
@@ -308,7 +317,7 @@ class Network:
         self._optimizer = tfa.optimizers.LazyAdam(args.learning_rate, beta_1=0.9, beta_2=0.99)
         self._metrics = {
             'tagger_accuracy': tf.metrics.CategoricalAccuracy(),
-            'lemmatizer_accuracy': tf.metrics.Accuracy(),
+            'lemmatizer_accuracy': WordAccuracy(),
             'tagger_loss': tf.metrics.Mean(),
             'lemmatizer_loss': tf.metrics.Mean(),
             'grad_norm': tf.metrics.Mean(),
@@ -351,7 +360,7 @@ class Network:
                     pred_ids = tf.pad(pred_ids, [[0,0],[0, padding]])
             loss = criterion(target_onehot, pred_value, sample_weight=mask)
             self._metrics['lemmatizer_loss'].update_state(loss)
-            self._metrics['lemmatizer_accuracy'].update_state(target, pred_ids, mask)
+            self._metrics['lemmatizer_accuracy'].update_state(target, pred_ids)
             return loss
         return fn
 
