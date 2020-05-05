@@ -16,6 +16,7 @@ from morpho_dataset import MorphoDataset
 from data import create_pipelines, collect_tag_configurations
 import wandb
 
+MorphoDataset = partial(MorphoDataset, 'czech_pdt')
 NUM_TEST_SENTENCES = 10
 
 class MaskedLayer(tf.keras.layers.Layer):
@@ -409,8 +410,6 @@ def parse_args():
     parser.add_argument("--word-dropout", default=0.25, type=float)
     parser.add_argument("--learning-rate", default=0.001, type=float)
     parser.add_argument("--grad-clip", default=3.0, type=float)
-    # IMPORTANT: LemmaTag paper uses lemmatag scheduler, but default is cosine (works better)
-    parser.add_argument("--scheduler", default='cosine', choices=['lemmatag', 'cosine'], help='The lemmatag paper uses lemmatag learning rate scheduler, however cosine decay works better, therefore it is left here as default')
     parser.add_argument("--label-smoothing", default=0.1, type=float)
     parser.add_argument("--encoder-layers", default=2, type=int)
     parser.add_argument("--seed", default=42, type=int, help="Random seed.")

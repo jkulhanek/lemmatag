@@ -130,3 +130,5 @@ dmypy.json
 model.h5
 tagger-competition-*.txt
 tagger-*.txt
+czech_pdt.zip
+predictions-*.txt
