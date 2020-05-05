@@ -489,7 +489,7 @@ def output_predictions(model, predictions, dataset_type, out_path='lemmatag-{dat
 def parse_args(): 
     argstr = ' '.join(sys.argv)
     parser = argparse.ArgumentParser()
-    parser.add_argument("--batch-size", default=16, type=int, help="Batch size.")
+    parser.add_argument("--batch-size", default=32, type=int, help="Batch size.")
     parser.add_argument("--epochs", default=40, type=int, help="Number of epochs.")
     parser.add_argument("--dropout", default=0.5, type=float)
     parser.add_argument("--word-dropout", default=0.25, type=float)
