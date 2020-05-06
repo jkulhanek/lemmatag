@@ -16,7 +16,6 @@ from morpho_dataset import MorphoDataset
 from data import create_pipelines, collect_tag_configurations
 import wandb
 
-MorphoDataset = partial(MorphoDataset, 'czech_pdt')
 NUM_TEST_SENTENCES = 10
 
 class MaskedLayer(tf.keras.layers.Layer):
