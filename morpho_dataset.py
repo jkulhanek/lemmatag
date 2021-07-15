@@ -21,9 +21,9 @@ import numpy as np
 #   - alphabet_map: Character -> char_id map.
 #   - alphabet: Char_id -> character list.
 #   - charseqs: Sequences of characters of the original words.
-class MorphoDataset:
-    _URL = "https://ufal.mff.cuni.cz/~straka/courses/npfl114/1920/datasets/"
 
+
+class MorphoDataset:
     class Factor:
         PAD = 0
         UNK = 1
@@ -67,7 +67,8 @@ class MorphoDataset:
                     for f in range(self.FACTORS):
                         factor = self._data[f]
                         if not in_sentence:
-                            if len(factor.word_ids): factor.word_ids[-1] = np.array(factor.word_ids[-1], np.int32)
+                            if len(factor.word_ids):
+                                factor.word_ids[-1] = np.array(factor.word_ids[-1], np.int32)
                             factor.word_ids.append([])
                             factor.word_strings.append([])
                             if factor.characters:
@@ -135,7 +136,8 @@ class MorphoDataset:
 
                 # Character-level data
                 for f, factor in enumerate(self._data):
-                    if not factor.characters: continue
+                    if not factor.characters:
+                        continue
 
                     max_charseq_len = max(len(charseq) for i in batch_perm for charseq in factor.charseqs[i])
 
@@ -146,11 +148,10 @@ class MorphoDataset:
 
                 yield batch
 
-
     def __init__(self, add_bow_eow=False, max_sentences=None):
         data_folder = os.environ['DATASETS_PATH'] if 'DATASETS_PATH' in os.environ else os.path.expanduser('~/datasets')
         ensure_dataset_exists(data_folder)
-        dataset_path = os.path.join(data_folder, 'ud-treebanks-v2.2/UD_Czech-PDT') 
+        dataset_path = os.path.join(data_folder, 'ud-treebanks-v2.2/UD_Czech-PDT')
         for dataset in ["train", "dev", "test"]:
             with open(os.path.join(dataset_path, f'cs_pdt-ud-{dataset}.lemmatag'), 'rb') as dataset_file:
                 setattr(self, dataset, self.Dataset(dataset_file,
