@@ -1,9 +1,6 @@
 # LemmaTag: Jointly Tagging and Lemmatizing for Morphologically-Rich Languages with BRNNs
 **Unofficial** LemmaTag [1] implementation in TensorFlow 2
 
-## Implementation status
-Currently, only POS tagging is implemented.
-
 ## Getting started
 Each experiment can be run with the following command:
 ```
