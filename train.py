@@ -13,6 +13,7 @@ from functools import partial
 from itertools import chain
 
 from morpho_dataset import MorphoDataset
+from model import LemmatagConfig
 from data import create_pipelines, collect_tag_configurations
 import wandb
 
@@ -62,19 +63,19 @@ class TagDecoder(tf.keras.layers.Layer):
         return result
 
 
-def Encoder(args, num_words, num_chars, unknown_char): 
+def Encoder(config): 
     word_ids = tf.keras.layers.Input((None,), dtype=tf.int32, name='word_ids')
     charseqs = tf.keras.layers.Input((None, None,), dtype=tf.int32, name='charseqs') 
 
     # We will prepare the word embedding and the character-level embedding
-    masked_word_ids = MaskedLayer(unknown_char, args.word_dropout)(word_ids)
-    we = tf.keras.layers.Embedding(num_words, args.we_dim, mask_zero=True)(masked_word_ids)
+    masked_word_ids = MaskedLayer(config.unknown_char, config.word_dropout)(word_ids)
+    we = tf.keras.layers.Embedding(config.num_words, config.we_dim, mask_zero=True)(masked_word_ids)
     valid_words = tf.where(word_ids != 0)
     cle = tf.gather_nd(charseqs, valid_words) 
-    cle = tf.keras.layers.Embedding(num_chars, args.we_dim // 2, mask_zero=True)(cle)
-    cle = tf.keras.layers.Dropout(args.dropout)(cle)
+    cle = tf.keras.layers.Embedding(config.num_chars, config.we_dim // 2, mask_zero=True)(cle)
+    cle = tf.keras.layers.Dropout(config.dropout)(cle)
     cle_outputs, cle_state_fwd, cle_state_bwd = tf.keras.layers.Bidirectional(
-        tf.keras.layers.GRU(args.we_dim // 2, return_sequences=True, return_state=True),
+        tf.keras.layers.GRU(config.we_dim // 2, return_sequences=True, return_state=True),
     )(cle) 
     cle_states = tf.keras.layers.Concatenate(-1)([cle_state_fwd, cle_state_bwd])
     cle = tf.scatter_nd(valid_words, cle_states, [tf.shape(charseqs)[0], tf.shape(charseqs)[1], cle_states.shape[-1]]) 
@@ -82,24 +83,24 @@ def Encoder(args, num_words, num_chars, unknown_char):
 
     # We will build the network trunk 
     x = embedded
-    x = tf.keras.layers.Dropout(args.dropout)(x)
-    for _ in range(args.encoder_layers): 
+    x = tf.keras.layers.Dropout(config.dropout)(x)
+    for _ in range(config.encoder_layers): 
         xres = tf.keras.layers.Bidirectional(
-            tf.keras.layers.LSTM(args.we_dim, return_sequences=True),
+            tf.keras.layers.LSTM(config.we_dim, return_sequences=True),
             merge_mode='sum'
         )(x)
-        xres = tf.keras.layers.Dropout(args.dropout)(xres)
+        xres = tf.keras.layers.Dropout(config.dropout)(xres)
         x = tf.keras.layers.Add()([x, xres])
     return tf.keras.Model(inputs=[word_ids, charseqs], outputs=[x, cle_states, cle_outputs]) 
 
 
 class LemmaDecoder(tf.keras.Model):
-    def __init__(self, args, num_target_chars, bow, eow):
+    def __init__(self, config):
         super().__init__()
-        self.num_target_chars = num_target_chars
-        self.rnn_dim = args.we_dim 
-        self.target_cle_dim = args.we_dim // 2
-        self.eow, self.bow = eow, bow
+        self.num_target_chars = config.num_target_chars
+        self.rnn_dim = config.we_dim 
+        self.target_cle_dim = config.we_dim // 2
+        self.eow, self.bow = config.eow, config.bow
 
     def build(self, input_shape):
         self.rnn_cell = tf.keras.layers.LSTMCell(self.rnn_dim) 
@@ -145,11 +146,12 @@ class LemmaDecoder(tf.keras.Model):
 
 
 class Model(tf.keras.Model):
-    def __init__(self, args, num_words, num_chars, tag_configurations, unknown_char, num_target_chars, bow, eow):
+    def __init__(self, config):
         super().__init__()
-        self.encoder = Encoder(args, num_words, num_chars, unknown_char)
-        self.tag_decoder = TagDecoder(tag_configurations)
-        self.lemmatizer = LemmaDecoder(args, num_target_chars, bow, eow)
+        self.config = config
+        self.encoder = Encoder(config)
+        self.tag_decoder = TagDecoder(config.tag_configurations)
+        self.lemmatizer = LemmaDecoder(config)
 
     def call(self, inputs, training_targets=None, training=None):
         encoded, cle_states, cle_outputs = self.encoder(inputs, training=training)
@@ -167,6 +169,22 @@ class Model(tf.keras.Model):
         lemma_outputs = self.lemmatizer(inputs, target=training_targets,
                 mask=encoded._keras_mask, training=training)
         return (tag_outputs, lemma_outputs)
+
+
+    def from_pretrained(pretrained_model_name_or_path: str, **kwargs) -> "Model":
+        config = kwargs.get('config', pretrained_model_name_or_path)
+        if isinstance(config, str):
+            # Load config
+            config = LemmatagConfig.from_pretrained(config)
+
+        model_path = pretrained_model_name_or_path
+
+        # Load model
+        model = Model(config)
+        model([tf.zeros((10, 35), dtype=tf.int32), tf.zeros((10, 35, 13), dtype=tf.int32)], training_targets=tf.zeros((154, 14), dtype=tf.int32), training=True)
+        model([tf.zeros((10, 35), dtype=tf.int32), tf.zeros((10, 35, 13), dtype=tf.int32)], training_targets=tf.zeros((154, 14), dtype=tf.int32), training=False)
+        model.load_weights(os.path.join(model_path, 'tf_model.h5'))
+        return model
 
 
 class WordAccuracy(tf.keras.metrics.Mean):
